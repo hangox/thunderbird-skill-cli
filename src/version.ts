@@ -9,8 +9,9 @@ import { fileURLToPath } from "node:url";
 //   开发仓库：  dist/version.js        -> ../package.json = 仓库根 package.json
 //   发布包：    dist/version.js        -> ../package.json = 包根 package.json
 //
-// 注意：这与 CLI_SCHEMA_VERSION 是**两个不同的概念**。前者是产品版本（0.2.0），
-// 后者是 stdout JSON envelope 的契约版本（1.0），二者独立演进，不得混用。
+// 注意：这与 CLI_SCHEMA_VERSION 是**两个不同的概念**。前者是产品版本（随发布递增，
+// 以 package.json 为准），后者是 stdout JSON envelope 的契约版本，二者独立演进，
+// 不得混用，也不应假定它们同步变化。
 
 let cached: string | undefined;
 

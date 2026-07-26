@@ -185,7 +185,12 @@ jobs:
 
       - name: 发布到 npm（OIDC trusted publishing，无 token）
         if: steps.exists.outputs.skip == 'false'
-        # 不设置 NODE_AUTH_TOKEN：认证完全依赖 id-token。
-        # 直接发布已审计的 tgz，不重新打包。
+        # 不设置 NODE_AUTH_TOKEN：认证完全依赖 id-token。setup-node 的 registry-url
+        # 是 npm 官方 trusted publishing 示例中的标准配置，予以保留。
+        #
+        # 【必须使用绝对路径】npm 12 会把 "dist-release/xxx.tgz" 这种裸相对路径解析成
+        # git shorthand（github:dist-release/xxx.tgz），导致 EALLOWGIT 失败。
+        # 只有绝对路径或显式 ./ 前缀才会被当作本地 tarball 文件。
+        #
         # provenance 对以 tgz 形式发布是否自动生成，待首次 OIDC 发布后在 npm 页面实测确认。
-        run: npm publish "dist-release/${{ needs.verify.outputs.tgz-name }}" --access public
+        run: npm publish "${GITHUB_WORKSPACE}/dist-release/${{ needs.verify.outputs.tgz-name }}" --access public

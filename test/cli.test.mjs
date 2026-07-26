@@ -462,3 +462,51 @@ test("XPI 安全评审基准清单存在且与当前产物一致", async () => {
   assert.equal(manifest.generatorPlatform, "darwin");
   assert.match(JSON.stringify(manifest.$comment), /macOS|平台/);
 });
+
+test("release workflow 的 npm publish 目标必须是无歧义的本地文件路径", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+  const publishLines = workflow.split("\n").filter((line) => /\bnpm publish\b/.test(line) && !line.trim().startsWith("#"));
+  assert.equal(publishLines.length, 1, "应恰好有一条 npm publish 命令");
+  const [line] = publishLines;
+  const target = /npm publish\s+"([^"]+)"/.exec(line)?.[1];
+  assert.ok(target, `无法解析 npm publish 目标：${line}`);
+  // npm 12 会把裸相对路径 dir/file.tgz 解析成 git shorthand（github:dir/file.tgz），
+  // 触发 EALLOWGIT。必须是绝对路径或显式 ./ 前缀。
+  const unambiguous = target.startsWith("/") || target.startsWith("./") || target.startsWith("${GITHUB_WORKSPACE}") || target.startsWith("$GITHUB_WORKSPACE");
+  assert.ok(unambiguous, `npm publish 目标 ${target} 是裸相对路径，会被 npm 解析为 git spec`);
+  assert.doesNotMatch(target, /^[A-Za-z0-9._-]+\//, "目标不得以裸目录名开头");
+  // 文件名是 GitHub 表达式，运行时才展开为 *.tgz；因此断言其引用的是 tgz-name 输出
+  assert.ok(/\.tgz$/.test(target) || /tgz-name\s*\}\}$/.test(target), `目标必须指向 tarball：${target}`);
+});
+
+test("publish job 不注入 NODE_AUTH_TOKEN，认证仅依赖 id-token", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+  const publishJob = workflow.slice(workflow.indexOf("  publish:"));
+  // setup-node 的 registry-url 是 npm 官方 trusted publishing 示例中的标准配置，保留；
+  // 但绝不能显式设置 NODE_AUTH_TOKEN / NPM_TOKEN，否则等于引入长期凭据。
+  assert.doesNotMatch(publishJob, /NODE_AUTH_TOKEN\s*:/, "publish job 不得设置 NODE_AUTH_TOKEN");
+  assert.doesNotMatch(publishJob, /NPM_TOKEN/, "publish job 不得引用 NPM_TOKEN");
+  assert.match(publishJob, /id-token:\s*write/, "必须声明 id-token: write");
+  assert.match(publishJob, /registry-url:/, "保留官方示例中的 registry-url");
+});
+
+test("npm 对裸相对路径与显式本地路径的解析差异（执行级）", async (t) => {
+  // 用真实 npm 验证：显式 ./ 前缀会被当作本地 tarball 文件解析；
+  // 裸相对路径则被当作 git/registry spec —— 这正是 workflow 必须用绝对路径的原因。
+  const { mkdtemp, writeFile: write, mkdir: mk } = await import("node:fs/promises");
+  const dir = await mkdtemp(join(tmpdir(), "tb-spec-"));
+  t.after(async () => import("node:fs/promises").then(({ rm }) => rm(dir, { recursive: true, force: true })));
+  await mk(join(dir, "out"), { recursive: true });
+  const pkgDir = join(dir, "pkg");
+  await mk(pkgDir, { recursive: true });
+  await write(join(pkgDir, "package.json"), JSON.stringify({ name: "tb-spec-fixture", version: "1.0.0" }));
+  execFileSync("npm", ["pack", "--pack-destination", join(dir, "out")], { cwd: pkgDir, stdio: "ignore" });
+  const tgz = join(dir, "out", "tb-spec-fixture-1.0.0.tgz");
+
+  // 绝对路径必须被解析为本地文件（能被 npm pack 接受即证明是文件 spec）
+  const abs = spawnSync("npm", ["pack", "--dry-run", tgz], { cwd: dir, encoding: "utf8" });
+  assert.equal(abs.status, 0, `绝对路径应被当作本地 tarball：${abs.stderr}`);
+  // 裸相对路径不得被解析为该本地文件
+  const bare = spawnSync("npm", ["pack", "--dry-run", "out/tb-spec-fixture-1.0.0.tgz"], { cwd: dir, encoding: "utf8" });
+  assert.notEqual(bare.status, 0, "裸相对路径不应被解析为本地 tarball（npm 会当作 git/registry spec）");
+});

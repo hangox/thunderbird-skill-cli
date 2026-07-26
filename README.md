@@ -11,7 +11,7 @@
 ```mermaid
 flowchart LR
   U[用户] --> C[Claude Code]
-  C -->|按需加载| S[/thunderbird Skill]
+  C -->|按需加载| S["/thunderbird Skill"]
   S -->|argv + 临时输入文件| CLI[thunderbird CLI]
   CLI -->|HTTPS-like 本地 API语义<br/>实际 HTTP/1.1 loopback| EXT[Thunderbird 专用扩展]
   EXT --> TB[Thunderbird 账户/邮件/日历 API]

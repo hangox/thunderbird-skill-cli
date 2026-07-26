@@ -28,22 +28,22 @@ thunderbird [--json|--human] [--instance ID|--profile ID] [--timeout MS] <comman
 | `status` | 无 | 只读 | MVP |
 | `accounts list` | `--include-identities` | 只读 | MVP |
 | `folders list` | `--account ID`、`--parent REF` | 只读 | MVP |
-| `search` | `--input FILE|-`、`--limit`、`--cursor` | 只读 | MVP |
+| `search` | `--input FILE\|-`、`--limit`、`--cursor` | 只读 | MVP |
 | `recent` | `--account ID`、`--folder REF`、`--limit` | 只读 | MVP |
-| `message get` | `MESSAGE_REF`、`--format text|markdown|raw`、`--max-bytes` | 只读 | MVP |
+| `message get` | `MESSAGE_REF`、`--format text\|markdown\|raw`、`--max-bytes` | 只读 | MVP |
 | `message open` | `MESSAGE_REF` | 只读/UI | MVP |
-| `message mark` | `--input FILE|-` | 可逆 | Phase 2 |
-| `message move` | `--input FILE|-` | 可逆 | Phase 2 |
-| `message trash` | `--input FILE|-` | 可逆 | Phase 2 |
-| `message delete` | `--input FILE|-`、强确认 | 破坏性 | Future |
-| `draft create` | `--input FILE|-` | 可逆 | Phase 2 |
-| `draft update` | `DRAFT_REF --input FILE|-` | 可逆 | Phase 2 |
+| `message mark` | `--input FILE\|-` | 可逆 | Phase 2 |
+| `message move` | `--input FILE\|-` | 可逆 | Phase 2 |
+| `message trash` | `--input FILE\|-` | 可逆 | Phase 2 |
+| `message delete` | `--input FILE\|-`、强确认 | 破坏性 | Future |
+| `draft create` | `--input FILE\|-` | 可逆 | Phase 2 |
+| `draft update` | `DRAFT_REF --input FILE\|-` | 可逆 | Phase 2 |
 | `draft open` | `DRAFT_REF` | 只读/UI | Phase 2 |
-| `draft send` | `DRAFT_REF --confirm FILE|-` | 外发 | Phase 3 |
+| `draft send` | `DRAFT_REF --confirm FILE\|-` | 外发 | Phase 3 |
 | `attachments list` | `MESSAGE_REF` | 只读 | MVP |
-| `attachments save` | `--input FILE|-` | 可逆/文件写入 | Phase 2 |
+| `attachments save` | `--input FILE\|-` | 可逆/文件写入 | Phase 2 |
 | `calendar list` | 无 | 只读 | Phase 3 |
-| `calendar events` | `--input FILE|-` | 只读 | Phase 3 |
+| `calendar events` | `--input FILE\|-` | 只读 | Phase 3 |
 | `watch` | `--events ... --duration SEC` | 只读/长运行 | Future |
 
 命令 registry 是名称、风险和阶段的单一来源。新增或重命名命令属于契约变更，必须经过兼容性审查。

@@ -17,22 +17,22 @@ thunderbird [--json|--human] [--instance ID|--profile ID] <command> [args]
 | `status` | 当前实例、协议与能力状态 | 只读 |
 | `accounts list` | 授权账号与发件 identity | 只读 |
 | `folders list` | 账号文件夹 | 只读 |
-| `search --input FILE|-` | 搜索邮件摘要 | 只读 |
+| `search --input FILE\|-` | 搜索邮件摘要 | 只读 |
 | `recent` | 近期邮件摘要 | 只读 |
 | `message get REF` | 按引用读取正文 | 只读 |
 | `message open REF` | 在 Thunderbird 打开邮件 | 只读/UI |
-| `message mark --input FILE|-` | 修改已读、星标或标签 | 可逆 |
-| `message move --input FILE|-` | 移动并返回 undo | 可逆 |
-| `message trash --input FILE|-` | 移入废纸篓并返回 undo | 可逆 |
-| `draft create --input FILE|-` | 创建草稿 | 可逆 |
-| `draft update REF --input FILE|-` | 更新草稿 | 可逆 |
+| `message mark --input FILE\|-` | 修改已读、星标或标签 | 可逆 |
+| `message move --input FILE\|-` | 移动并返回 undo | 可逆 |
+| `message trash --input FILE\|-` | 移入废纸篓并返回 undo | 可逆 |
+| `draft create --input FILE\|-` | 创建草稿 | 可逆 |
+| `draft update REF --input FILE\|-` | 更新草稿 | 可逆 |
 | `draft open REF` | 打开撰写窗口 | 只读/UI |
 | `draft send REF --prepare` | 获取最新发送摘要与 confirmation ID | 外发准备 |
-| `draft send REF --confirm FILE|-` | 提交具体、一次性发送确认 | 外发 |
+| `draft send REF --confirm FILE\|-` | 提交具体、一次性发送确认 | 外发 |
 | `attachments list REF` | 列出附件元数据 | 只读 |
-| `attachments save --input FILE|-` | 保存到显式目录，默认不覆盖 | 可逆 |
+| `attachments save --input FILE\|-` | 保存到显式目录，默认不覆盖 | 可逆 |
 | `calendar list` | 日历列表 | 只读 |
-| `calendar events --input FILE|-` | 查询事件 | 只读 |
+| `calendar events --input FILE\|-` | 查询事件 | 只读 |
 
 当前阶段命令可能返回 `E_NOT_IMPLEMENTED`。
 

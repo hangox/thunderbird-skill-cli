@@ -149,7 +149,7 @@ thunderbird xpi reveal            # 在 Finder 中定位（仅 macOS）
 
 ## 发布（维护者）
 
-发布物是独立的 staging 包（`build/plugin`），与开发仓库分离；开发仓库保持私有。
+发布物是独立的 staging 包（`build/plugin`），与开发仓库分离。
 
 ```bash
 npm run release:check   # check + 全量测试 + 构建 staging + tarball 审计
@@ -157,7 +157,22 @@ npm run validate:plugin # 官方 claude plugin validate 校验两份 manifest
 npm run pack:dry-run    # 查看将要发布的文件清单
 ```
 
-推送 `v<版本>` tag 触发 `release.yml`，经 npm trusted publishing（OIDC）发布，仓库内不存放任何 npm token。
+### XPI 安全评审基准
+
+扩展 XPI 的期望 SHA-256 记录在受 Git 管理的 `release/xpi-checksums.json` 中，按产品版本索引。构建与审计会同时断言：当前版本在清单中有条目、现场生成的根 XPI 等于清单值、最终包内 XPI 也等于清单值。缺清单或任一不匹配即失败。
+
+**扩展内容发生变化时，必须重新做安全评审并显式更新该清单**——这一步刻意保持人工。
+
+XPI 的字节可复现性依赖 macOS `/usr/bin/zip`，因此必须在 macOS 上生成（CI 的 `verify` job 固定 `macos-latest`）。跨平台 zip 字节一致性未经验证；若迁到 Linux 后校验失败，应视为平台差异并重新评审，**不得直接改写清单 SHA 绕过**。
+
+### 发布流程
+
+推送 `v<版本>` tag 触发 `release.yml`：
+
+1. **`verify`（macos-latest）**：跑全部测试与门禁，构建并审计 tarball，计算 SHA-256，把 tgz 与 checksum 一起上传为 artifact。
+2. **`publish`（ubuntu-latest）**：**不做任何构建**，只下载该 artifact、逐字节核验 SHA 与包名版本，再经 npm trusted publishing（OIDC）发布同一份字节。
+
+这样对外发布的就是 macOS 上验证过的那一份 tarball，避免跨平台打包差异。仓库内不存放任何 npm token。
 
 **首次发布前需要人工完成（无法由 CI 代劳）：**
 

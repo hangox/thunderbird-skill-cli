@@ -430,3 +430,35 @@ test("CLI 不提供任何自动安装 XPI 或绕过 Thunderbird 确认的路径"
   // reveal 只允许 open -R（在 Finder 中定位），不得是 open 直接打开文件
   assert.match(xpiSource, /"\/usr\/bin\/open", \["-R", path\]/);
 });
+
+test("--version 输出产品版本而非 envelope schema 版本，且无第二个版本源", async () => {
+  const [{ CLI_SCHEMA_VERSION }, pkg] = await Promise.all([
+    import("../dist/contracts/envelope.js"),
+    readFile(new URL("../package.json", import.meta.url), "utf8").then(JSON.parse),
+  ]);
+  const result = await execFileAsync(process.execPath, [cli.pathname, "--version"], { encoding: "utf8" });
+  const reported = result.stdout.trim();
+  assert.equal(reported, pkg.version, "--version 必须等于 package.json 的版本");
+  assert.notEqual(reported, CLI_SCHEMA_VERSION, "--version 不得再输出 envelope schema 版本");
+  assert.equal(CLI_SCHEMA_VERSION, "1.0", "envelope schema 版本独立且保持 1.0");
+
+  // 产品版本只能来自 package.json，不允许在源码里硬编码出第二个版本源
+  const versionSource = await readFile(new URL("../src/version.ts", import.meta.url), "utf8");
+  assert.match(versionSource, /package\.json/);
+  assert.doesNotMatch(versionSource, /"\d+\.\d+\.\d+"/, "version.ts 不得硬编码版本号");
+});
+
+test("XPI 安全评审基准清单存在且与当前产物一致", async () => {
+  const [manifest, pkg] = await Promise.all([
+    readFile(new URL("../release/xpi-checksums.json", import.meta.url), "utf8").then(JSON.parse),
+    readFile(new URL("../package.json", import.meta.url), "utf8").then(JSON.parse),
+  ]);
+  const entry = manifest.versions[pkg.version];
+  assert.ok(entry, `清单必须包含当前版本 ${pkg.version} 的条目`);
+  const { createHash } = await import("node:crypto");
+  const actual = createHash("sha256").update(await readFile(new URL("../thunderbird-skill-bridge-phase1.xpi", import.meta.url))).digest("hex");
+  assert.equal(actual, entry.xpiSha256, "现场生成的 XPI 必须等于评审基准");
+  // 平台约束必须被显式记录，避免未来迁到 Linux 后直接改写 SHA 绕过
+  assert.equal(manifest.generatorPlatform, "darwin");
+  assert.match(JSON.stringify(manifest.$comment), /macOS|平台/);
+});

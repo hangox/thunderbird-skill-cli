@@ -110,11 +110,29 @@ async function main(): Promise<void> {
       }
     }
 
-    // 5. XPI 与源码冻结件一致
+    // 5. XPI 必须等于受 Git 管理的安全评审基准（F1）
+    // 只比"根 XPI vs 包内副本"是恒真检查，无法发现 XPI 被换成未经评审的内容。
+    const manifestPath = resolve(projectRoot, "release", "xpi-checksums.json");
+    let checksums: { generatorPlatform: string; versions: Record<string, { xpiSha256: string }> } | undefined;
+    try { checksums = JSON.parse(await readFile(manifestPath, "utf8")); } catch { checksums = undefined; }
     const packagedXpi = createHash("sha256").update(await readFile(join(unpacked, "assets", "thunderbird-skill-bridge.xpi"))).digest("hex");
-    const frozenXpi = createHash("sha256").update(await readFile(resolve(projectRoot, "thunderbird-skill-bridge-phase1.xpi"))).digest("hex");
-    if (packagedXpi !== frozenXpi) fail(`包内 XPI 与仓库冻结件不一致：${packagedXpi} != ${frozenXpi}`);
-    else process.stdout.write(`  ✔ XPI SHA-256 与仓库冻结件一致：${packagedXpi}\n`);
+    const rootXpi = createHash("sha256").update(await readFile(resolve(projectRoot, "thunderbird-skill-bridge-phase1.xpi"))).digest("hex");
+    const pkgForXpi = JSON.parse(await readFile(join(unpacked, "package.json"), "utf8")) as { version: string };
+    if (!checksums) fail("缺少 release/xpi-checksums.json，不允许在无评审基准的情况下发布");
+    else {
+      const expected = checksums.versions[pkgForXpi.version];
+      if (!expected) fail(`XPI 校验清单缺少版本 ${pkgForXpi.version} 的条目`);
+      else {
+        if (rootXpi !== expected.xpiSha256) fail(`现场生成的根 XPI 与评审基准不一致：${rootXpi} != ${expected.xpiSha256}`);
+        if (packagedXpi !== expected.xpiSha256) fail(`包内 XPI 与评审基准不一致：${packagedXpi} != ${expected.xpiSha256}`);
+        if (rootXpi === expected.xpiSha256 && packagedXpi === expected.xpiSha256) {
+          process.stdout.write(`  ✔ 根 XPI 与包内 XPI 均等于评审基准：${expected.xpiSha256}\n`);
+        }
+      }
+      if (process.platform !== checksums.generatorPlatform) {
+        fail(`XPI 必须在 ${checksums.generatorPlatform} 上生成与审计（当前 ${process.platform}）；跨平台 zip 字节一致性未经验证`);
+      }
+    }
 
     // 6. 版本一致性：package.json / plugin.json / marketplace.json 三处同值
     const pkg = JSON.parse(await readFile(join(unpacked, "package.json"), "utf8")) as { version: string; name: string };
@@ -128,6 +146,18 @@ async function main(): Promise<void> {
     else process.stdout.write(`  ✔ 版本四处一致：${pkg.version}\n`);
     if (marketEntry.source.package !== pkg.name) fail(`marketplace 引用的包名与发布包不一致：${marketEntry.source.package} != ${pkg.name}`);
     else process.stdout.write(`  ✔ marketplace 引用包名一致：${pkg.name}\n`);
+
+    // 7. 实际执行包内 CLI，断言 --version 输出等于 tarball 的 package version（F2）
+    const cliPath = join(unpacked, "bin", "thunderbird.js");
+    const { stdout: versionOut } = await execFileAsync(process.execPath, [cliPath, "--version"], { encoding: "utf8" });
+    const reported = versionOut.trim();
+    if (reported !== pkg.version) fail(`包内 CLI --version 输出 ${reported}，与包版本 ${pkg.version} 不一致`);
+    else process.stdout.write(`  ✔ 包内 CLI --version 实测输出 ${reported}，与包版本一致\n`);
+    // envelope schema 版本与产品版本是两个概念，必须独立断言仍为 1.0
+    const envelopeSource = await readFile(join(unpacked, "dist", "contracts", "envelope.js"), "utf8");
+    const schemaMatch = /CLI_SCHEMA_VERSION\s*=\s*"([^"]+)"/.exec(envelopeSource);
+    if (schemaMatch?.[1] !== "1.0") fail(`CLI_SCHEMA_VERSION 应为 1.0，实测 ${schemaMatch?.[1]}`);
+    else process.stdout.write("  ✔ CLI_SCHEMA_VERSION 仍为 1.0（与产品版本独立）\n");
 
     if (failures === 0) process.stdout.write("\n✔ tarball 审计全部通过\n");
     else process.stdout.write(`\n✘ tarball 审计失败：${failures} 项\n`);

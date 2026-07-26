@@ -46,6 +46,29 @@ async function listFiles(root: string): Promise<string[]> {
 const rootPackage = JSON.parse(await readFile(resolve(projectRoot, "package.json"), "utf8")) as RootPackage;
 const { version } = rootPackage;
 
+// ---- 0. XPI 安全评审基准门禁（F1）
+// 仅比较"根 XPI 与包内副本"是恒真检查，发现不了 XPI 被替换成未经评审的内容。
+// 这里改为与受 Git 管理的版本化清单比对：现场生成的 XPI 必须等于评审过的 SHA。
+interface ChecksumManifest {
+  generatorPlatform: string;
+  versions: Record<string, { xpiSha256: string }>;
+}
+const manifestPath = resolve(projectRoot, "release", "xpi-checksums.json");
+let checksums: ChecksumManifest;
+try {
+  checksums = JSON.parse(await readFile(manifestPath, "utf8")) as ChecksumManifest;
+} catch {
+  throw new Error(`缺少 XPI 校验清单 ${relative(projectRoot, manifestPath)}；不允许在无评审基准的情况下构建发布包`);
+}
+const expected = checksums.versions[version];
+if (!expected) {
+  throw new Error(`XPI 校验清单中没有版本 ${version} 的条目；扩展内容变更后必须显式更新清单并重新安全评审`);
+}
+// XPI 字节可复现性依赖 macOS /usr/bin/zip，跨平台未验证。
+if (process.platform !== checksums.generatorPlatform) {
+  throw new Error(`XPI 必须在 ${checksums.generatorPlatform} 上生成（当前 ${process.platform}）；跨平台 zip 字节一致性未经验证，校验失败应视为平台差异并重新安全评审，不得直接改写清单 SHA`);
+}
+
 await rm(stagingRoot, { recursive: true, force: true });
 await mkdir(stagingRoot, { recursive: true });
 
@@ -67,7 +90,12 @@ await cp(resolve(projectRoot, "skill", "thunderbird"), join(stagingRoot, "skills
 // ---- 3. XPI：必须来自本轮确定性打包的冻结件
 await mkdir(join(stagingRoot, "assets"), { recursive: true });
 const xpiSha = await sha256(XPI_SOURCE);
+if (xpiSha !== expected.xpiSha256) {
+  throw new Error(`根 XPI SHA-256 与评审基准不一致：\n  实测 ${xpiSha}\n  基准 ${expected.xpiSha256}\n扩展内容若确有变更，需重新安全评审并更新 release/xpi-checksums.json`);
+}
 await cp(XPI_SOURCE, join(stagingRoot, "assets", XPI_TARGET_NAME));
+const stagedXpiSha = await sha256(join(stagingRoot, "assets", XPI_TARGET_NAME));
+if (stagedXpiSha !== expected.xpiSha256) throw new Error(`staging 内 XPI SHA 与评审基准不一致：${stagedXpiSha}`);
 
 // ---- 4. bin wrapper：转发到 dist/cli.js，保持单一实现
 await mkdir(join(stagingRoot, "bin"), { recursive: true });
@@ -121,6 +149,6 @@ for (const f of files) total += (await stat(join(stagingRoot, f))).size;
 
 process.stdout.write(`plugin staging 目录：${relative(projectRoot, stagingRoot)}\n`);
 process.stdout.write(`版本：${version}\n`);
-process.stdout.write(`XPI SHA-256：${xpiSha}\n`);
+process.stdout.write(`XPI SHA-256：${xpiSha}（== 评审基准）\n`);
 process.stdout.write(`文件数：${files.length}，合计 ${(total / 1024).toFixed(1)} KiB\n`);
 for (const f of files) process.stdout.write(`  ${f}\n`);

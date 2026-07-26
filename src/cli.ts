@@ -4,6 +4,7 @@ import { CLI_SCHEMA_VERSION, createRequestId, type ErrorCode, type ErrorEnvelope
 import { createSigningIdentityInKeychain, loadSigningIdentityFromKeychain } from "./auth.js";
 import { discoverInstances, DiscoveryError, type DiscoveredInstance } from "./discovery.js";
 import { locateXpi, revealInFinder, XPI_FILE_NAME } from "./xpi.js";
+import { productVersion } from "./version.js";
 import { beginPairing, fetchStatus, TransportError } from "./transport.js";
 
 const EXIT = { OK: 0, USAGE: 2, NOT_READY: 3, AUTH: 4, POLICY: 5, NOT_FOUND: 6, TEMPORARY: 7, INTERNAL: 10 } as const;
@@ -212,7 +213,8 @@ async function main(): Promise<void> {
   if (args.length === 0 || args.includes("--help") || args.includes("-h")) { printHelp(); process.exit(EXIT.OK); }
   if (args[0] === "--version" || args[0] === "version") {
     if (args.length !== 1) return emitError("version", "E_VALIDATION", "version 不接受额外参数", false, options.human);
-    process.stdout.write(CLI_SCHEMA_VERSION + "\n");
+    // 输出产品版本，不是 envelope schema 版本
+    process.stdout.write(productVersion() + "\n");
     process.exit(EXIT.OK);
   }
   const spec = findCommand(args);

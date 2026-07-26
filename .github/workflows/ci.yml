@@ -9,12 +9,27 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 钉到本地已实测兼容的版本，不用 latest
+  CLAUDE_CODE_VERSION: '2.1.119'
+
 jobs:
   verify:
-    # 需要 macOS：Keychain / codesign / Finder 相关测试在 Linux 上会被跳过或不成立
+    # 必须 macOS：Keychain / codesign / Finder 相关测试在 Linux 上会被跳过；
+    # 且 XPI 的字节可复现性依赖 macOS /usr/bin/zip，跨平台未经验证。
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: 确认生成平台为 macOS
+        run: |
+          if [ "$RUNNER_OS" != "macOS" ]; then
+            echo "XPI 必须在 macOS 上生成；当前 $RUNNER_OS"; exit 1
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -37,14 +52,14 @@ jobs:
           npm run test:security
           npm run test:extension
 
-      - name: 构建 plugin staging
+      - name: 构建 plugin staging（内含 XPI 评审基准门禁）
         run: npm run build:plugin
 
       - name: 校验 plugin 与 marketplace manifest
         # 用 npx 拉取 Claude Code CLI 做官方 schema 校验；失败即视为 CI 失败
         run: |
-          npx --yes @anthropic-ai/claude-code@latest plugin validate ./build/plugin
-          npx --yes @anthropic-ai/claude-code@latest plugin validate .
+          npx --yes @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} plugin validate ./build/plugin
+          npx --yes @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} plugin validate .
 
       - name: npm pack dry-run
         run: npm pack --dry-run

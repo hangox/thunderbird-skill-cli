@@ -1,0 +1,30 @@
+{
+  "$comment": [
+    "扩展 XPI 的安全评审基准。这是受 Git 管理的版本化清单，作用是把发布包绑定到",
+    "**经过安全评审的那一份 XPI 字节**，而不是仅仅比较'根 XPI 与包内副本相同'——",
+    "后者是恒真检查，无法发现 XPI 本身被替换或重建成了未经评审的内容。",
+    "",
+    "构建与审计会同时断言三件事，任一不符即失败：",
+    "  1. 当前 package/plugin/marketplace 版本 == 本清单中的版本键",
+    "  2. 干净检出上现场重新生成的根 XPI SHA-256 == 本清单记录值",
+    "  3. 最终 tarball 内的 XPI SHA-256 == 本清单记录值",
+    "",
+    "【平台约束 · 重要】",
+    "此处记录的 SHA 依赖 macOS /usr/bin/zip 的已验证字节可复现性。XPI 必须在",
+    "macOS 上生成（CI 的 verify job 固定 macos-latest），跨平台 zip 字节一致性",
+    "尚未验证。若未来把生成迁到 Linux 而校验失败，应视为**平台差异并需要重新做",
+    "安全评审**，禁止直接改写此处 SHA 绕过校验。",
+    "",
+    "扩展内容发生任何变化时，必须显式更新本清单（新增版本键与新 SHA），并重新",
+    "走安全评审——这一步是刻意设计成人工的。"
+  ],
+  "generatorPlatform": "darwin",
+  "generatorTool": "/usr/bin/zip -X (scripts/package-extension.ts)",
+  "versions": {
+    "0.2.0": {
+      "xpiSha256": "2dd1891f012d1139a69aa8dd5eab1a6e1b5fe0910ccb300b18d96c54e41774a3",
+      "reviewedOn": "2026-07-26",
+      "note": "Phase 1 安全底座冻结候选：protocolVersion=1 + Ed25519，descriptorVersion=2 + signed pairingEpoch"
+    }
+  }
+}

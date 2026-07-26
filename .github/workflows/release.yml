@@ -1,6 +1,11 @@
 name: Release
 
-# 由 v* tag 触发。发布前重跑全部门禁，任何一项失败都不会走到 publish。
+# 由 v* tag 触发。
+#
+# 设计意图：**发布的必须是 macOS 上验证过的那一份字节**。
+# XPI 的字节可复现性依赖 macOS /usr/bin/zip，跨平台未经验证；因此 tgz 只在
+# macOS verify job 生成与审计，ubuntu publish job 只负责下载同一 artifact 并发布，
+# 不做任何构建，从根本上消除跨平台 zip 差异。
 on:
   push:
     tags: ['v*']
@@ -8,19 +13,37 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # 同一 tag 的发布串行执行；绝不取消已经开始的发布
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # 钉到本地已实测兼容的版本，不用 latest，避免上游变更突然打断发布
+  CLAUDE_CODE_VERSION: '2.1.119'
+
 jobs:
-  # 验证在 macOS 上跑：Keychain / codesign / Finder 相关测试在 Linux 上会被 skip，
-  # 只有 macOS 才能给出完整覆盖。
   verify:
+    # 必须是 macOS：XPI 审核 SHA 依赖 macOS /usr/bin/zip 的已验证字节可复现性
     runs-on: macos-latest
+    outputs:
+      tgz-name: ${{ steps.pack.outputs.name }}
+      tgz-sha256: ${{ steps.pack.outputs.sha256 }}
+      pkg-name: ${{ steps.pack.outputs.pkg }}
+      pkg-version: ${{ steps.pack.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          # 22.x 最新版：同时满足 trusted publishing (>=22.14.0)
-          # 与原生 TypeScript 类型剥离 (>=22.18)
+          # 22.x 最新版：满足 trusted publishing (>=22.14.0) 与原生 .ts 类型剥离 (>=22.18)
           node-version: '22'
+
+      - name: 确认生成平台为 macOS
+        run: |
+          if [ "$RUNNER_OS" != "macOS" ]; then
+            echo "XPI 必须在 macOS 上生成；当前 $RUNNER_OS"; exit 1
+          fi
 
       - name: 安装依赖
         run: npm ci
@@ -37,64 +60,122 @@ jobs:
           npm run test:security
           npm run test:extension
 
-      - name: 构建 plugin staging
+      - name: 构建 plugin staging（内含 XPI 评审基准门禁）
         run: npm run build:plugin
 
       - name: 校验 plugin 与 marketplace manifest
         run: |
-          npx --yes @anthropic-ai/claude-code@latest plugin validate ./build/plugin
-          npx --yes @anthropic-ai/claude-code@latest plugin validate .
+          npx --yes @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} plugin validate ./build/plugin
+          npx --yes @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} plugin validate .
 
       - name: tarball 审计
         run: npm run audit:package
 
+      - name: 生成待发布 tgz 并计算 SHA-256
+        id: pack
+        run: |
+          mkdir -p dist-release
+          NAME=$(cd build/plugin && npm pack --pack-destination "$GITHUB_WORKSPACE/dist-release" --json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8'))[0].filename")
+          PKG=$(node -p "require('./build/plugin/package.json').name")
+          VER=$(node -p "require('./build/plugin/package.json').version")
+          SHA=$(shasum -a 256 "dist-release/$NAME" | cut -d' ' -f1)
+          echo "$SHA  $NAME" > "dist-release/$NAME.sha256"
+          {
+            echo "name=$NAME"
+            echo "sha256=$SHA"
+            echo "pkg=$PKG"
+            echo "version=$VER"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### 已审计的发布 tarball"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 包名 | \`$PKG\` |"
+            echo "| 版本 | \`$VER\` |"
+            echo "| 文件 | \`$NAME\` |"
+            echo "| SHA-256 | \`$SHA\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: 校验 tag 与包版本一致
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          PKG=$(node -p "require('./build/plugin/package.json').version")
-          if [ "$TAG" != "$PKG" ]; then
-            echo "tag ($TAG) 与包版本 ($PKG) 不一致"; exit 1
+          if [ "$TAG" != "${{ steps.pack.outputs.version }}" ]; then
+            echo "tag ($TAG) 与包版本 (${{ steps.pack.outputs.version }}) 不一致"; exit 1
           fi
-          echo "版本一致：$PKG"
+
+      - name: 上传已审计 tgz 与 checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-tarball
+          path: dist-release/
+          if-no-files-found: error
+          retention-days: 7
 
   publish:
     needs: verify
     runs-on: ubuntu-latest
-    # Environment 便于加审批门禁，也便于 npm Trusted Publisher 精确绑定
+    # 该 job 零构建：只下载、核验、发布 macOS 验证过的同一份字节
     environment: npm-publish
     permissions:
       # OIDC trusted publishing 的唯一必需权限；仓库内不存放任何长期 npm token
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
-          # 22.x 最新版：满足 trusted publishing (>=22.14.0) 与原生 .ts 支持 (>=22.18)
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
       - name: 升级 npm 到支持 trusted publishing 的版本（>= 11.5.1）
-        run: npm install -g npm@latest
+        run: |
+          npm install -g npm@latest
+          npm --version
 
-      - name: 记录 npm 版本
-        run: npm --version
+      - name: 下载已审计 tgz
+        uses: actions/download-artifact@v4
+        with:
+          name: release-tarball
+          path: dist-release
 
-      - name: 安装依赖
-        run: npm ci
+      - name: 逐字节核验 artifact 与 macOS 侧 SHA 一致
+        run: |
+          cd dist-release
+          NAME="${{ needs.verify.outputs.tgz-name }}"
+          EXPECTED="${{ needs.verify.outputs.tgz-sha256 }}"
+          ACTUAL=$(sha256sum "$NAME" | cut -d' ' -f1)
+          echo "期望 $EXPECTED"
+          echo "实测 $ACTUAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "artifact 与 macOS 生成的 tgz 字节不一致，拒绝发布"; exit 1
+          fi
+          # checksum 文件由 verify job 生成，此处只读校验，不重写
+          sha256sum -c "$NAME.sha256"
+          {
+            echo "### 已发布的 tarball"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 文件 | \`$NAME\` |"
+            echo "| SHA-256 | \`$ACTUAL\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 用与 CI 相同的脚本重新构建发布包
-        run: npm run build:plugin
-
-      - name: 发布前再次审计 tarball
-        run: npm run audit:package
+      - name: 核验 tgz 内的包名与版本
+        run: |
+          cd dist-release
+          tar -xzf "${{ needs.verify.outputs.tgz-name }}" package/package.json
+          NAME=$(node -p "require('./package/package.json').name")
+          VER=$(node -p "require('./package/package.json').version")
+          if [ "$NAME" != "${{ needs.verify.outputs.pkg-name }}" ] || [ "$VER" != "${{ needs.verify.outputs.pkg-version }}" ]; then
+            echo "tgz 内包名/版本与 verify 输出不一致：$NAME@$VER"; exit 1
+          fi
+          rm -rf package
 
       - name: 幂等保护——该版本若已存在则跳过发布
         id: exists
         run: |
-          NAME=$(node -p "require('./build/plugin/package.json').name")
-          VER=$(node -p "require('./build/plugin/package.json').version")
+          NAME="${{ needs.verify.outputs.pkg-name }}"
+          VER="${{ needs.verify.outputs.pkg-version }}"
           if npm view "$NAME@$VER" version >/dev/null 2>&1; then
             echo "已存在 $NAME@$VER，跳过发布"
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -105,6 +186,6 @@ jobs:
       - name: 发布到 npm（OIDC trusted publishing，无 token）
         if: steps.exists.outputs.skip == 'false'
         # 不设置 NODE_AUTH_TOKEN：认证完全依赖 id-token。
-        # provenance 由 npm 在受支持的 CI 上自动生成，此处不强制传 --provenance。
-        run: npm publish --access public
-        working-directory: build/plugin
+        # 直接发布已审计的 tgz，不重新打包。
+        # provenance 对以 tgz 形式发布是否自动生成，待首次 OIDC 发布后在 npm 页面实测确认。
+        run: npm publish "dist-release/${{ needs.verify.outputs.tgz-name }}" --access public

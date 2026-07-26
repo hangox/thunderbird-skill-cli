@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Thunderbird Skill Bridge",
+  "version": "0.2.0",
+  "description": "为本机 thunderbird CLI 提供无邮件权限的 Phase 1 回环服务与配对",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "thunderbird-skill-bridge@local",
+      "strict_min_version": "128.0"
+    }
+  },
+  "background": {
+    "scripts": ["dist/background.js"]
+  },
+  "experiment_apis": {
+    "thunderbirdSkillBridge": {
+      "schema": "bridge/schema.json",
+      "parent": {
+        "scopes": ["addon_parent"],
+        "paths": [["thunderbirdSkillBridge"]],
+        "script": "bridge/api.js"
+      }
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "permissions": [],
+  "host_permissions": [],
+  "web_accessible_resources": []
+}

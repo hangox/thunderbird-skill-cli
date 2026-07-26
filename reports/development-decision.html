@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Thunderbird Skill CLI｜开发决策报告</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172033;
+      --muted: #58677d;
+      --line: #dce4ed;
+      --panel: #ffffff;
+      --canvas: #f5f8fb;
+      --blue: #1d5fa7;
+      --blue-soft: #eaf3fc;
+      --green: #08783e;
+      --green-soft: #e9f7ef;
+      --amber: #9a5b00;
+      --amber-soft: #fff4d9;
+      --red: #a62b2b;
+      --red-soft: #fff0f0;
+      --violet: #6b46a3;
+      --violet-soft: #f4eefe;
+      --shadow: 0 6px 24px rgba(25, 44, 70, .07);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--canvas);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.58;
+    }
+    main { max-width: 1320px; margin: 0 auto; padding: 38px 30px 70px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font-size: clamp(30px, 4vw, 50px); line-height: 1.12; letter-spacing: -.035em; margin-bottom: 14px; }
+    h2 { font-size: 25px; margin-bottom: 17px; }
+    h3 { font-size: 18px; margin-bottom: 8px; }
+    .eyebrow { color: var(--blue); font-weight: 750; letter-spacing: .08em; text-transform: uppercase; font-size: 12px; }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) minmax(360px, .55fr);
+      gap: 24px;
+      align-items: stretch;
+      margin-bottom: 24px;
+    }
+    .hero > section, .card, .diagram, .table-wrap, .decision-box {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+    }
+    .hero-main { padding: 34px; }
+    .hero-main > p { color: var(--muted); font-size: 18px; max-width: 800px; margin-bottom: 22px; }
+    .hero-status { padding: 28px; display: flex; flex-direction: column; justify-content: center; }
+    .status-title { font-size: 14px; color: var(--muted); }
+    .status-big { font-size: 29px; font-weight: 800; color: var(--amber); margin: 5px 0 7px; }
+    .status-note { color: var(--muted); margin: 0; }
+    .badge { display: inline-flex; align-items: center; gap: 7px; border-radius: 999px; padding: 6px 11px; font-size: 13px; font-weight: 700; margin: 3px 5px 3px 0; }
+    .badge.green { background: var(--green-soft); color: var(--green); }
+    .badge.amber { background: var(--amber-soft); color: var(--amber); }
+    .badge.red { background: var(--red-soft); color: var(--red); }
+    .badge.blue { background: var(--blue-soft); color: var(--blue); }
+    .badge.violet { background: var(--violet-soft); color: var(--violet); }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 25px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .card { padding: 22px; }
+    .card p:last-child { margin-bottom: 0; }
+    .metric { font-size: 29px; font-weight: 800; margin: 5px 0; }
+    .muted { color: var(--muted); }
+    .section { margin-top: 32px; }
+    .section-head { display: flex; justify-content: space-between; gap: 15px; align-items: end; margin-bottom: 14px; }
+    .section-head h2 { margin-bottom: 0; }
+    .section-head p { color: var(--muted); margin-bottom: 2px; max-width: 750px; }
+    .diagram { padding: 25px; overflow-x: auto; }
+    .flow { min-width: 950px; display: flex; align-items: stretch; gap: 12px; }
+    .node { flex: 1; min-width: 160px; border: 1px solid #bed1e5; background: var(--blue-soft); border-radius: 12px; padding: 17px; text-align: center; }
+    .node strong { display: block; margin-bottom: 5px; }
+    .node small { color: var(--muted); }
+    .node.blocked { border-color: #e8c682; background: var(--amber-soft); }
+    .node.future { border-color: #d2c2ea; background: var(--violet-soft); }
+    .arrow { align-self: center; color: var(--blue); font-size: 25px; font-weight: 800; }
+    .comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .architecture { padding: 25px; }
+    .architecture h3 { display: flex; align-items: center; justify-content: space-between; }
+    .architecture.target { border: 2px solid #99c9ad; }
+    .architecture.rejected { border: 1px dashed #e1a5a5; background: #fffafa; }
+    .stack { display: grid; gap: 8px; margin-top: 15px; }
+    .stack-item { border-radius: 9px; padding: 10px 13px; background: #eef3f8; border: 1px solid #d7e0ea; text-align: center; font-weight: 650; }
+    .target .stack-item:nth-child(2) { background: var(--blue-soft); border-color: #bfd6ec; }
+    .target .stack-item:nth-child(3) { background: var(--green-soft); border-color: #b9ddc8; }
+    .rejected .stack-item:nth-child(2), .rejected .stack-item:nth-child(3) { background: var(--red-soft); border-color: #ecc4c4; }
+    .table-wrap { overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; min-width: 850px; }
+    th, td { padding: 13px 15px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { background: #edf3f8; color: #34445b; font-size: 13px; letter-spacing: .02em; }
+    tr:last-child td { border-bottom: 0; }
+    code { background: #edf2f7; padding: 2px 6px; border-radius: 5px; color: #34445b; }
+    ul, ol { margin: 8px 0 0; padding-left: 21px; }
+    li + li { margin-top: 5px; }
+    .auth-model { display: grid; grid-template-columns: 1fr 70px 1fr; align-items: stretch; gap: 12px; }
+    .auth-layer { border-radius: 14px; padding: 23px; border: 1px solid var(--line); background: var(--panel); }
+    .auth-layer.session { border-top: 5px solid var(--blue); }
+    .auth-layer.identity { border-top: 5px solid var(--green); }
+    .plus { align-self: center; text-align: center; font-size: 38px; color: var(--muted); }
+    .warning { margin-top: 17px; padding: 15px 18px; background: var(--red-soft); border-left: 5px solid var(--red); border-radius: 9px; color: #6e2525; }
+    .gate-list { counter-reset: gate; display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; padding: 0; list-style: none; }
+    .gate-list li { counter-increment: gate; margin: 0; position: relative; padding: 16px 16px 16px 50px; background: #fff; border: 1px solid var(--line); border-radius: 11px; }
+    .gate-list li::before { content: counter(gate); position: absolute; left: 14px; top: 15px; width: 25px; height: 25px; border-radius: 50%; display: grid; place-items: center; background: var(--blue); color: #fff; font-weight: 800; font-size: 13px; }
+    .send-gate { border: 2px solid #e2b252; background: linear-gradient(135deg, #fff 0%, #fff8e8 100%); padding: 25px; border-radius: 16px; }
+    .decision-box { margin-top: 28px; padding: 28px; border-color: #a8c8e7; }
+    .decisions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; }
+    .decision { padding: 16px; border-radius: 10px; background: var(--blue-soft); border: 1px solid #c7dcef; }
+    footer { margin-top: 30px; color: var(--muted); font-size: 13px; text-align: center; }
+    @media (max-width: 980px) {
+      .hero, .comparison, .auth-model { grid-template-columns: 1fr; }
+      .grid-4, .grid-3, .decisions { grid-template-columns: repeat(2, 1fr); }
+      .plus { transform: rotate(90deg); height: 45px; }
+      .gate-list { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 620px) {
+      main { padding: 22px 14px 45px; }
+      .grid-4, .grid-3, .decisions { grid-template-columns: 1fr; }
+      .hero-main, .hero-status { padding: 23px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="hero">
+    <section class="hero-main">
+      <div class="eyebrow">Development Decision Brief · 2026-07-25</div>
+      <h1>设计已完成，可以启动安全验证；尚不能直接进入完整开发</h1>
+      <p>当前仓库已经具备非 MCP 架构、CLI 契约、扩展安全边界、Skill 工作流、测试与分阶段计划。下一步应先用 4 名 gpt-sol 完成 Phase 1 spike，把 Thunderbird 兼容性、本地传输和客户端身份从设计假设变成机器证据。</p>
+      <span class="badge green">设计与骨架已完成</span>
+      <span class="badge amber">实现尚未开始</span>
+      <span class="badge red">真实邮件操作未启用</span>
+      <span class="badge blue">Phase 1 可启动</span>
+    </section>
+    <section class="hero-status">
+      <div class="status-title">当前总状态</div>
+      <div class="status-big">有条件开发就绪</div>
+      <p class="status-note">仅允许兼容性、安全底座与 mock/status/pairing spike。Thunderbird MCP 扩展当前也尚未安装或启动；本项目没有读取、修改或发送邮件。</p>
+    </section>
+  </div>
+
+  <div class="grid-4">
+    <article class="card"><div class="muted">Phase 1 人数</div><div class="metric">4 人</div><p>四条独立 spike 并行，接口冻结后汇合。</p></article>
+    <article class="card"><div class="muted">完整开发稳定阵型</div><div class="metric">5 人</div><p>4 名模块 owner + 1 名独立安全/集成 reviewer。</p></article>
+    <article class="card"><div class="muted">当前自动测试</div><div class="metric">4 / 4</div><p>CLI 骨架测试通过，尚不代表 Thunderbird 真实兼容性。</p></article>
+    <article class="card"><div class="muted">外发状态</div><div class="metric">禁用</div><p>只有后置安全门与隔离 E2E 通过后才允许测试。</p></article>
+  </div>
+
+  <section class="section">
+    <div class="section-head"><div><div class="eyebrow">Why not full development now</div><h2>为什么不能立即完整开发</h2></div><p>问题不是文档不够，而是四个关键假设必须在真实 Thunderbird 与 macOS 环境中验证，否则后续邮件 API、附件和外发都建立在不稳定地基上。</p></div>
+    <div class="grid-4">
+      <article class="card"><span class="badge amber">待验证</span><h3>MV3 / Experiment 生命周期</h3><p class="muted">Thunderbird 128 ESR 与当前版本能否稳定承载特权扩展、本地服务、关闭清理和签名发布。</p></article>
+      <article class="card"><span class="badge amber">待验证</span><h3>本地 Server 选型</h3><p class="muted">复用 Mozilla HTTP server 或自建最小 server，涉及攻击面、许可证、关闭行为和跨版本兼容。</p></article>
+      <article class="card"><span class="badge amber">待验证</span><h3>同用户进程认证</h3><p class="muted">读取 descriptor 的同一 OS 用户进程也能拿到 token；token-only 不能证明调用者是已配对 CLI。</p></article>
+      <article class="card"><span class="badge amber">待验证</span><h3>macOS 路径与沙箱</h3><p class="muted">Terminal、Thunderbird GUI、双 profile、TCC 和附件可见性下的 descriptor/临时文件行为尚需实测。</p></article>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head"><div><div class="eyebrow">Target architecture</div><h2>MCP 与目标 Skill CLI 结构</h2></div><p>目标是按需加载、稳定领域命令和一次性 CLI，不注册常驻 MCP server，也不预加载约 40 个工具 schema。</p></div>
+    <div class="comparison">
+      <article class="architecture rejected">
+        <h3>现有 Thunderbird MCP 路径 <span class="badge red">不采用</span></h3>
+        <div class="stack">
+          <div class="stack-item">Claude / MCP Client</div>
+          <div class="stack-item">MCP 生命周期 + 约 40 个工具 schema</div>
+          <div class="stack-item">JSON-RPC over stdio bridge</div>
+          <div class="stack-item">localhost HTTP + Thunderbird 扩展</div>
+        </div>
+        <p class="muted">当前这套第三方扩展在本机尚未安装或启动；项目只研究了其源码，没有修改或调用它。</p>
+      </article>
+      <article class="architecture target">
+        <h3>Thunderbird Skill CLI <span class="badge green">目标</span></h3>
+        <div class="stack">
+          <div class="stack-item">用户 → Claude Code</div>
+          <div class="stack-item">按需加载 `/thunderbird` Skill</div>
+          <div class="stack-item">一次性 `thunderbird --json` CLI</div>
+          <div class="stack-item">版本化 127.0.0.1 API → 专用扩展</div>
+        </div>
+        <p class="muted">扩展是唯一邮箱权限持有者；CLI 不存 IMAP/SMTP 密码，不获取邮箱 OAuth token。</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head"><div><div class="eyebrow">Phase 1 team</div><h2>4 名 gpt-sol 的 Phase 1 分工</h2></div><p>4 人刚好覆盖四条可独立推进的风险线。压到 3 人会让 Auth 与 CLI 互相阻塞；接口冻结前增加到 5 人以上容易产生协调开销。</p></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>角色</th><th>负责范围</th><th>首轮输出</th><th>依赖</th></tr></thead>
+        <tbody>
+          <tr><td><strong>A · 扩展兼容 / Adapter</strong></td><td>Manifest、Experiment API、生命周期、只读 Thunderbird adapter</td><td>128 ESR/当前版本最小 XPI、API 差异和兼容矩阵</td><td>可立即开始</td></tr>
+          <tr><td><strong>B · Transport / Auth / Policy</strong></td><td>loopback server、descriptor 写入、session、签名、配对、授权</td><td>server 选型、仅 status/pairing 的安全原型、负向测试</td><td>可立即开始</td></tr>
+          <tr><td><strong>C · CLI / Discovery / Contract</strong></td><td>doctor/setup/status、descriptor 发现、多实例、版本握手</td><td>安全发现原型、mock integration、稳定 CLI 错误语义</td><td>可立即开始</td></tr>
+          <tr><td><strong>D · E2E / Skill / Release</strong></td><td>隔离 profile、fixture、测试编排、非 MCP 扫描、产物验证</td><td>可重复 E2E harness、HTML/机器报告、残留清理验证</td><td>可立即开始</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="diagram" style="margin-top:16px">
+      <div class="flow">
+        <div class="node"><strong>A 兼容性 spike</strong><small>冻结扩展生命周期</small></div><div class="arrow">→</div>
+        <div class="node"><strong>B + C 冻结协议</strong><small>descriptor / status / auth</small></div><div class="arrow">→</div>
+        <div class="node"><strong>配对 + 只读 Adapter</strong><small>仍无写入与外发</small></div><div class="arrow">→</div>
+        <div class="node blocked"><strong>Phase 1 Exit Gate</strong><small>负向测试与 E2E 证据</small></div><div class="arrow">→</div>
+        <div class="node future"><strong>只读 MVP</strong><small>后续阶段才开放</small></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head"><div><div class="eyebrow">Full implementation</div><h2>完整开发为何建议 5 人</h2></div><p>进入邮件业务后，四位模块 owner 都有持续工作，需要第五人保持独立视角，负责跨边界安全审查、故障注入和集成质量门，而不是自己审自己的认证与发送代码。</p></div>
+    <div class="grid-3">
+      <article class="card"><h3>4 名模块 Owner</h3><p class="muted">扩展/Adapter、Transport/Auth、CLI/Contract、E2E/Skill/Release，保持文件与接口所有权。</p></article>
+      <article class="card"><h3>第 5 人：独立安全与集成</h3><p class="muted">对抗式验证认证绕过、跨账号、重放、路径攻击、部分失败和重复发送，并主持阶段准入。</p></article>
+      <article class="card"><h3>何时临时增到 6 人</h3><p class="muted">仅在日历 recurrence 或长期 watch 开始后增加领域负责人；首轮无需提前扩员。</p></article>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head"><div><div class="eyebrow">Authentication decision</div><h2>认证结论：短期会话 + 长期客户端身份</h2></div><p>descriptor 权限和 session token 是必要底层，但不能单独识别同一用户下的调用进程。最终模型必须让已配对 CLI 证明它持有独有私钥。</p></div>
+    <div class="auth-model">
+      <article class="auth-layer session">
+        <span class="badge blue">第一层</span>
+        <h3>启动期 Session Secret</h3>
+        <ul>
+          <li>每个 Thunderbird 实例启动时生成 256-bit secret。</li>
+          <li>descriptor 目录 <code>0700</code>、文件 <code>0600</code>，原子写入。</li>
+          <li>负责实例发现、阻挡网页与其他 OS 用户、约束短期会话。</li>
+          <li>启动、重载、撤销时轮换；不建议 MVP 做高频周期轮换。</li>
+        </ul>
+      </article>
+      <div class="plus">+</div>
+      <article class="auth-layer identity">
+        <span class="badge green">第二层</span>
+        <h3>Ed25519 客户端身份</h3>
+        <ul>
+          <li>首次配对由 CLI 生成密钥对，私钥优先存 macOS Keychain。</li>
+          <li>扩展仅保存公钥、client ID、授权账号与能力。</li>
+          <li>每请求签名 protocol、instance、method、path、body hash、timestamp、nonce、request ID。</li>
+          <li>扩权必须 Thunderbird UI 批准，撤销立即使会话与确认失效。</li>
+        </ul>
+      </article>
+    </div>
+    <div class="warning"><strong>token-only 的边界：</strong>任何能以同一 OS 用户读取 descriptor 的进程都可复制 session token。timestamp 与 nonce 只能阻止旧请求重放，不能证明调用者是已配对 CLI；<code>X-Thunderbird-Client</code> 也只是可伪造字符串。若 Ed25519/Keychain 技术验证失败，最多允许 token-only 的只读 MVP，禁止写入与外发。</div>
+  </section>
+
+  <section class="section">
+    <div class="section-head"><div><div class="eyebrow">Exit criteria</div><h2>Phase 1 必须通过的技术验证与退出门</h2></div><p>每项都需要可重复的机器证据；“设计上应该可行”不算通过。</p></div>
+    <ol class="gate-list">
+      <li><strong>扩展兼容：</strong>在 Thunderbird 128 ESR 与当前目标版本稳定启动/停止最小 XPI，确认 MV3/Experiment 生命周期和签名发布约束。</li>
+      <li><strong>Server 安全：</strong>只绑定 <code>127.0.0.1</code>；错误 Host、Origin、method、Content-Type、超限 body 和浏览器 fetch 全部拒绝。</li>
+      <li><strong>密钥能力：</strong>验证 Ed25519 生成/签名/验证与 Keychain 存取；无 UI、SSH 和 CI 环境行为明确，性能满足请求路径。</li>
+      <li><strong>同用户威胁：</strong>恶意进程即使读取 session secret，没有私钥也不能调用业务 route；复制、改 body/path、跨实例/跨 client 均失败。</li>
+      <li><strong>配对抗攻击：</strong>六位码仅做人眼比对；256-bit intent secret、5 分钟过期、UI 批准、穷举/重放/批准竞态测试通过。</li>
+      <li><strong>发现与多实例：</strong>owner、权限、symlink、原子更新、stale PID、Terminal/GUI/双 profile 和歧义失败均通过。</li>
+      <li><strong>撤销与版本：</strong>撤销后现有连接、undo、confirmation 立即失效；协议主版本不兼容时失败关闭。</li>
+      <li><strong>隔离 E2E：</strong>使用 fixture profile，不接触个人邮箱；失败后无 token、临时正文、监听进程或 descriptor 残留。</li>
+    </ol>
+    <p><span class="badge red">退出门</span> P0 阻塞全部解除、身份模型冻结、以上负向测试通过，且 Phase 1 仍然没有邮件写入或发送 endpoint，才进入只读 MVP。</p>
+  </section>
+
+  <section class="section send-gate">
+    <div class="eyebrow">Real send E2E gate</div>
+    <h2>何时才允许向用户授权地址进行真实发送 E2E</h2>
+    <p>不是 Phase 1，也不是只读 MVP。必须先在本地捕获 SMTP / 隔离测试域证明 exactly-once 语义，然后满足全部条件并获得用户对具体地址、内容和时点的单次明确授权。</p>
+    <div class="grid-3">
+      <div><h3>技术前置</h3><ul><li>只读、可逆、附件、草稿阶段全部通过</li><li>revision 能检测收件人/正文/附件变化</li><li>未知网络结果通过 operation status 处理，不重复发送</li><li>外发威胁模型和独立安全审查通过</li></ul></div>
+      <div><h3>环境前置</h3><ul><li>先通过本地 SMTP sink E2E</li><li>使用专用测试 identity 和最小授权账号</li><li>外发能力默认关闭，由 Thunderbird UI 单独启用</li><li>日志、临时文件和撤销/撤权行为验证完毕</li></ul></div>
+      <div><h3>用户授权前置</h3><ul><li>用户明确指定授权收件地址</li><li>展示 From、To/Cc/Bcc、主题、正文摘要和附件</li><li>确认绑定最新 draft revision 且一次性、短期有效</li><li>不把一般“继续”当成未展示内容的发送授权</li></ul></div>
+    </div>
+    <p><strong>当前状态：</strong>不满足以上条件，因此禁止真实发送 E2E，也不得读写用户邮件。</p>
+  </section>
+
+  <section class="decision-box">
+    <div class="eyebrow">Next decision</div>
+    <h2>下一步与用户需要决定的事项</h2>
+    <div class="decisions">
+      <div class="decision"><strong>1. 是否批准 Phase 1</strong><br><span class="muted">仅兼容性、安全底座、status 与 pairing spike；不实现邮件读写。</span></div>
+      <div class="decision"><strong>2. 是否采用推荐认证</strong><br><span class="muted">session secret + Ed25519/Keychain；失败时只读降级，不开放写入。</span></div>
+      <div class="decision"><strong>3. 确认兼容基线</strong><br><span class="muted">Thunderbird 128 ESR、当前 ESR 与当前 release 的测试范围。</span></div>
+      <div class="decision"><strong>4. 指定 4 人 Owner</strong><br><span class="muted">按扩展、Auth、CLI、E2E 四个边界分配，并指定跨模块评审人。</span></div>
+      <div class="decision"><strong>5. 接受阶段门禁</strong><br><span class="muted">未解除 P0 与负向测试前，不进入只读 MVP，更不实现外发。</span></div>
+      <div class="decision"><strong>6. 暂不决定真实收件地址</strong><br><span class="muted">真实发送授权应等 Phase 5 条件具备时针对具体测试再次确认。</span></div>
+    </div>
+  </section>
+
+  <footer>Thunderbird Skill CLI · 开发决策报告 · 当前项目为设计与安全骨架，所有“待验证”项均未实现。</footer>
+</main>
+</body>
+</html>

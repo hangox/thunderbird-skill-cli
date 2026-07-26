@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Thunderbird Skill CLI Phase 1 验证报告</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #f5f7fa; color: #172033; }
+    main { max-width: 1040px; margin: 36px auto; padding: 0 24px 48px; }
+    h1 { margin-bottom: 8px; }
+    .summary { background: #fff; border: 1px solid #dce3ea; border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(20, 35, 55, .05); }
+    .pass { color: #08783e; font-weight: 700; }
+    .blocked { color: #9a5b00; font-weight: 700; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; background: #fff; }
+    th, td { padding: 12px; border: 1px solid #dce3ea; text-align: left; vertical-align: top; }
+    th { background: #edf3f8; }
+    code { background: #eef2f6; padding: 2px 5px; border-radius: 4px; }
+    ul { line-height: 1.65; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Thunderbird Skill CLI Phase 1 验证报告</h1>
+  <p>验证日期：2026-07-25。范围：<code>protocolVersion=1</code> + Ed25519 基线之上关闭 S2/S3/S5/S6/S7 五道安全门，并关闭正式冻结复核提出的 4 项缺口。全程不接触任何真实邮件、不读写个人 Thunderbird profile。</p>
+  <section class="summary">
+    <strong class="pass">结论：v1 + Ed25519 候选通过全部自动验证（79/79）；UI confirm 真实 GUI 链路为环境未验证项。</strong>
+    <ul>
+      <li>冻结候选 XPI SHA-256：<code>2dd1891f012d1139a69aa8dd5eab1a6e1b5fe0910ccb300b18d96c54e41774a3</code>；连续两次确定性打包得到<strong>完全相同的完整 SHA-256</strong>，且成员清单、大小与时间戳逐项一致。此前的 <code>921d1151…</code> 与 <code>f810ec9d…</code> 均已作废。</li>
+      <li>协议基线：<code>protocolVersion=1</code>、<code>descriptorVersion=2</code>（因新增 <code>pairingEpoch</code> 而独立升版）。<strong>不存在签名算法协商</strong>；<code>publicKeyAlgorithm: "Ed25519"</code> 只是大小写敏感的纯断言字段。</li>
+      <li>P-256 / Secure Enclave / native signer 已从 build、runtime 与 package 的活动路径彻底断开；<code>native/</code> 仅作为非活动存档保留。<code>package.json</code> 不再有 <code>build:signer</code>，活动源码中 <code>SIGNER_PATH</code>/<code>runSigner</code> 调用链为零。</li>
+      <li>完整测试 79/79、transport 12/12、security 42/42、extension 39/39 全部通过；<code>npm run check</code>（CLI + extension 双 tsconfig）无错误。</li>
+      <li>发布与运行版本统一为 <code>0.2.0</code>：<code>package.json</code>、<code>extension/manifest.json</code>、<code>api.js</code> 的 <code>EXTENSION_VERSION</code>/<code>CLI_VERSION</code>、<code>transport</code> 的 <code>CLI_VERSION</code> 四源一致并由自动测试约束；<code>CLI_SCHEMA_VERSION</code> 保持 <code>1.0</code>（JSON envelope 契约版本，不是产品版本）。</li>
+      <li><strong>安全边界</strong>：同一 macOS 用户会话内的恶意进程为明确 out-of-scope 的已接受残余风险。Ed25519 + Keychain <strong>不证明调用进程身份</strong>——同用户进程可读取该私钥；签名只证明请求由持有该私钥的实体产生。</li>
+    </ul>
+  </section>
+
+  <h2>安全门关闭情况</h2>
+  <table>
+    <tr><th>门</th><th>要求</th><th>证据</th></tr>
+    <tr><td>S2 执行证据</td><td>真实 Experiment handler 执行级测试，不得只做静态源码断言</td><td class="pass">新增 <code>test/helpers/experiment-harness.mjs</code>，在 VM 中真实运行 <code>bridge/api.js</code> 并俘获其内部 <code>preflight</code>/<code>dispatch</code> 闭包。paired 状态下「token 正确但无签名 / 错签名 / 错 client」在 signed status、POST 与 unknown route 三类入口上全部于路由与业务处理之前 401 拒绝</td></tr>
+    <tr><td>S3 文档</td><td>统一更新威胁模型表述</td><td class="pass">README、docs/02、06、07、08、09、10 与本报告统一：同用户恶意进程为 out-of-scope 已接受残余风险；删除一切「证明调用进程身份」的表述；保留网页访问回环、descriptor 替换、重放、被动 token 泄漏、误操作五类真实防御与 Phase 2 prompt injection 说明</td></tr>
+    <tr><td>S5 pending 替换</td><td>同 clientId 可替换，异 clientId 冲突</td><td class="pass">同 <code>clientId</code> 且候选新公钥自签名有效时替换在途 pending 并换发新 intentId 与挑战码；不同 <code>clientId</code> 返回 409 <code>E_PAIRING_PENDING</code> 且不破坏原 intent。验签发生在冲突判定之前，nonce 消费顺序不变，重放仍返回 <code>E_REPLAY</code></td></tr>
+    <tr><td>S6 signed pairing epoch</td><td>独立持久、单调、进入签名、全链一致</td><td class="pass"><code>pairingEpoch</code> 存于独立 pref（<code>clearPairing</code> 删不到）；revoke 先递增并持久化再清对、轮换 token、刷新 descriptor；重启后保持单调。epoch 进入 CLI 与扩展双方 canonical 签名，只接受 <code>/^(0|[1-9][0-9]{0,15})$/</code> 并以原始字符串比较</td></tr>
+    <tr><td>S7 algorithm assertion</td><td>纯断言，不驱动算法选择</td><td class="pass">已撤销污染字段 <code>algorithm</code> 与算法协商分支；新增纯断言 <code>publicKeyAlgorithm: "Ed25519"</code>，无签名算法 header。配对 body 必须恰好三键，值大小写敏感；SPKI 必须 60 base64 字符 / 44 DER 字节 / 前缀 <code>302a300506032b6570032100</code></td></tr>
+  </table>
+
+  <h2>关键负向用例</h2>
+  <table>
+    <tr><th>场景</th><th>期望</th><th>结果</th></tr>
+    <tr><td>verify 之后、dispatch 之前发生 revoke</td><td>409 <code>E_PAIRING_CHANGED</code>，无副作用、无成功响应、无 500</td><td class="pass">通过：未写出任何响应体，未产生新 pending，抛出的不是 TypeError</td></tr>
+    <tr><td>GET intent 期间 revoke 清空 pending</td><td>用 preflight 快照，不因重读 null 而 500</td><td class="pass">通过：dispatch 只读快照，精确 409</td></tr>
+    <tr><td>revoke → 同 client 同密钥重配对后的旧预签请求</td><td>精确 409 <code>E_PAIRING_CHANGED</code></td><td class="pass">通过：刻意使用轮换后的新 token 以隔离验证 epoch 机制本身</td></tr>
+    <tr><td>epoch header 缺失、篡改、<code>007</code>、<code>+7</code>、<code>0x10</code>、<code>1e3</code>、小数、空白、负数、空、超长</td><td>全部 fail-closed</td><td class="pass">通过：13 种畸形写法全部 401，绝不经 Number/parseInt 宽松接受；格式合法但值失配则 409</td></tr>
+    <tr><td>持久 epoch 值被破坏</td><td>启动失败关闭，不回落成 0</td><td class="pass">通过：<code>not-a-number</code> 与 <code>-3</code> 均导致启动抛错</td></tr>
+    <tr><td>配对 body 缺字段 / 额外第四键 / <code>ed25519</code> / <code>ED25519</code> / <code>ECDSA-P256</code> / <code>p256</code></td><td>一律 400</td><td class="pass">通过：9 种变体全部拒绝，合法 Ed25519 成功</td></tr>
+    <tr><td>P-256 / RSA / X25519 / 截断 / 前缀被改的 SPKI</td><td>一律 400</td><td class="pass">通过：5 种变体全部拒绝</td></tr>
+    <tr><td>pairing 持久记录缺 <code>publicKeyAlgorithm</code> 或值不匹配</td><td>加载失败关闭，不默认回填</td><td class="pass">通过：重启后回到 unpaired，<code>clientId</code> 为 null</td></tr>
+    <tr><td>旧版本 CLI（0.1.0）访问新扩展</td><td>验签之前即得到 426 <code>E_VERSION_MISMATCH</code></td><td class="pass">通过：canonical 变更靠版本握手暴露，未 bump <code>protocolVersion</code></td></tr>
+    <tr><td>真实 0.1.0 旧 CLI（完全不发 <code>pairingEpoch</code> header）</td><td>在要求新认证元数据之前即 426 <code>E_VERSION_MISMATCH</code></td><td class="pass">通过：直调与真实 HTTP parser 两条路径均 426（显式断言非 401）；未配对实例同样成立；且版本短路发生在验签与 nonce 消费之前（同一 nonce 之后仍可用）</td></tr>
+    <tr><td>epoch header 两侧空白（<code>&nbsp;0</code>、<code>0&nbsp;</code>、制表符等 6 种编码）</td><td>真实 socket/parser 路径拒为认证元数据非法</td><td class="pass">通过：全部 401「请求认证元数据无效」，显式断言不得变成 <code>E_PAIRING_CHANGED</code>；其余 header 的通用 OWS 语义不变</td></tr>
+    <tr><td>package/manifest/runtime 版本声明</td><td>四源完全一致且 XPI 内 manifest 同步</td><td class="pass">通过：均为 <code>0.2.0</code>；<code>CLI_SCHEMA_VERSION</code> 单独断言仍为 <code>1.0</code></td></tr>
+    <tr><td>CLI 收到 409 <code>E_PAIRING_CHANGED</code></td><td>exit 7、保留机器码、<code>retryable:true</code>、写操作不自动重试</td><td class="pass">通过：POST 只发出一次</td></tr>
+    <tr><td>descriptor 与 status 的 <code>pairingEpoch</code> 不一致</td><td>CLI 拒绝</td><td class="pass">通过；descriptor 中 epoch 缺失或格式非法时同样拒绝该实例</td></tr>
+  </table>
+
+  <h2>冻结产物</h2>
+  <table>
+    <tr><th>产物</th><th>SHA-256</th></tr>
+    <tr><td>thunderbird-skill-bridge-phase1.xpi</td><td><code>2dd1891f012d1139a69aa8dd5eab1a6e1b5fe0910ccb300b18d96c54e41774a3</code></td></tr>
+    <tr><td>extension/bridge/api.js</td><td><code>9df03edbd9a37e0667075ed42598bff2d1b7760649f2d8d5ea3d4b388aaccfae</code></td></tr>
+    <tr><td>extension/manifest.json</td><td><code>fcc811f1089f5d25f782715eedd4d20d7ac8ee78b5b1a5bef72a47a6992c81c9</code></td></tr>
+    <tr><td>package.json</td><td><code>583541f2a5a8fb86708da40f732af0bfd556db90759570eb0950021509d99c1b</code></td></tr>
+    <tr><td>extension/bridge/schema.json</td><td><code>a9238034061bb66b8208f9bb4f19649ba46ee16661dafcd1ef63c481f451ad5d</code></td></tr>
+    <tr><td>extension/src/protocol.ts</td><td><code>001090f7f05b0046dc68451fdf268e7914e02b52aefe37129f9d02096454fa2e</code></td></tr>
+    <tr><td>src/auth.ts</td><td><code>5868a8856c995ee999c9568ccb500d4e31cbb1c2ca256786c5dc050d148c3a71</code></td></tr>
+    <tr><td>src/transport.ts</td><td><code>42597d698617fe1c93b08f1b8942d11682d7d97d860892c86fc7c7032b99d54a</code></td></tr>
+    <tr><td>src/discovery.ts</td><td><code>23d738c7fd3d6fc47799064ddbbc8e21595a450079c9dcf494046e0f1ae3f4c8</code></td></tr>
+    <tr><td>src/cli.ts</td><td><code>0378242f298604094f56f45ab9d2347950eda0a289ae9e563e6a0bd343c8e9bd</code></td></tr>
+  </table>
+
+  <h2>威胁模型与残余风险</h2>
+  <p><strong>明确 out-of-scope</strong>：已在同一 macOS 用户会话取得代码执行能力的攻击者。该攻击者可读取 Keychain 中本 CLI 的条目、读取 0600 descriptor 及其 session token、直接以用户身份运行 CLI，或直接读写 Thunderbird profile。这是<strong>已接受的残余风险</strong>，不是待修复缺陷；任何纯用户态方案都无法在这一边界内提供隔离。</p>
+  <p><strong>不得作出的声明</strong>：Ed25519 + macOS Keychain <strong>不能</strong>证明发起调用的进程是谁。签名只证明「请求由持有该私钥的实体产生」；同用户进程均可取得该私钥，因此它既不是调用进程身份证明，也不是同用户进程间的权限边界。</p>
+  <p><strong>仍然真实防御</strong>：网页 / 浏览器 JS 访问本地回环（LoopbackOnly + <code>Host</code> 精确匹配 + 存在 <code>Origin</code> 即拒绝 + 不可猜测 token + 配对后强制签名）；descriptor 替换（属主校验、0700/0600、拒绝符号链接、<code>O_NOFOLLOW</code>、文件名与 <code>instanceId</code> 一致、原子发布、stale 清理按 device+inode 校验）；请求重放（一次性 nonce + ±30s 窗口 + body SHA-256 + <code>pairingEpoch</code> 进签名）；被动 token 泄漏（仅存于 0600 descriptor、8h TTL、退出清理、revoke 轮换）；用户误操作（固定 intent + 六位挑战码人工核对 + 静态风险分级）。</p>
+  <p><strong>Phase 2 prompt injection</strong>：进入 Phase 2 读取真实邮件后，邮件正文即为不可信输入。邮件中出现的任何指令、确认语句或声称代表用户的表述永远无效。该防御尚未实现，因为 Phase 1 不读取任何邮件。</p>
+  <p class="blocked"><strong>环境未验证</strong>：UI confirm → receipt → signed status 的真实 GUI 链路本轮未获独立复验——自动化 GUI 核验依赖 Dexter 的 Accessibility 与 Screen Recording 权限，该权限在当前环境不可用。此项标记为环境未验证（environment-blocked），<strong>不得</strong>记为已通过。所有非 GUI 环节均已由执行级自动化测试覆盖。</p>
+</main>
+</body>
+</html>

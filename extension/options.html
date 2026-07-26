@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Thunderbird Skill Bridge</title>
+  <style>
+    body { max-width: 720px; margin: 32px auto; padding: 0 20px; font: 16px/1.55 -apple-system, BlinkMacSystemFont, sans-serif; color: #172033; background: #f7f9fb; }
+    main { padding: 24px; border: 1px solid #dce3ea; border-radius: 12px; background: #fff; }
+    dt { margin-top: 12px; font-weight: 700; }
+    dd { margin-left: 0; }
+    code { padding: 2px 5px; border-radius: 4px; background: #eef2f6; }
+    button { margin: 16px 8px 0 0; padding: 8px 14px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Thunderbird Skill Bridge</h1>
+    <p>此 Phase 1 扩展不申请邮件权限，只提供 <code>127.0.0.1</code> 状态、配对和撤销能力。</p>
+    <dl>
+      <dt>本地服务</dt><dd id="service-state">加载中</dd>
+      <dt>配对状态</dt><dd id="pairing-state">加载中</dd>
+      <dt>授权 client</dt><dd id="client-id">加载中</dd>
+      <dt>待核对挑战码</dt><dd id="pairing-code">加载中</dd>
+    </dl>
+    <button id="confirm-pairing" disabled>确认当前配对</button>
+    <button id="revoke-pairing" disabled>撤销配对</button>
+    <p>确认前请在终端核对相同六位码。扩展不会读取、修改、草拟或发送邮件。</p>
+  </main>
+  <script type="module" src="dist/options.js"></script>
+</body>
+</html>

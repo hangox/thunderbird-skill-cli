@@ -1,0 +1,61 @@
+# 依赖
+node_modules/
+
+# 构建生成物（可由 `npm run build` 完整重建，不入库）
+# 该模式同时覆盖 dist/ 与 extension/dist/
+dist/
+*.tsbuildinfo
+coverage/
+
+# 打包产物：冻结的 XPI 保留在本地，但不提交到仓库
+*.xpi
+
+# 被否决路线的非活动存档。
+# native/ 内含 Apple provisioning profile、代码签名与已编译二进制
+# （embedded.provisionprofile 含 TeamName / TeamIdentifier / ApplicationIdentifierPrefix），
+# 属于签名身份材料，一律不上传；本地文件保留，不删除。
+native/
+
+# 凭据与环境变量
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.mobileprovision
+*.provisionprofile
+*.keychain
+*.keychain-db
+id_rsa*
+id_ed25519*
+
+# 运行时产物：descriptor 与 session token（正常位于系统临时目录，此处兜底）
+instances/
+*.descriptor.json
+
+# QA / 测试临时物
+tb-*-test-*/
+tb-experiment-*/
+tb-cli-*/
+tb-xpi-repro-*/
+tb-watchdog-test-*/
+.venv/
+venv/
+__pycache__/
+
+# 日志与缓存
+*.log
+npm-debug.log*
+.cache/
+.npm/
+
+# 系统与编辑器
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/

@@ -1,0 +1,36 @@
+{
+  "name": "thunderbird-skill-cli",
+  "version": "0.2.0",
+  "private": true,
+  "description": "面向 Claude Code Skill 的 Thunderbird 原生本地 CLI 与专用扩展 Phase 1 compatibility spike",
+  "type": "module",
+  "bin": {
+    "thunderbird": "./dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "extension/",
+    "skill/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "npm run build:cli && npm run build:extension",
+    "build:cli": "tsc -p tsconfig.json",
+    "build:extension": "tsc -p extension/tsconfig.json",
+    "package:extension": "npm run build:extension && node scripts/package-extension.ts",
+    "check": "tsc -p tsconfig.json --noEmit && tsc -p extension/tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "test:unit": "npm run build && node --test test/*.test.mjs",
+    "test:transport": "npm run build && node --test test/transport.test.mjs",
+    "test:security": "npm run build && node --test test/discovery.test.mjs test/auth.test.mjs test/non-mcp.test.mjs test/experiment-handler.test.mjs",
+    "cli": "node dist/cli.js",
+    "test:extension": "npm run build && node --test test/extension.test.mjs test/experiment-handler.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}

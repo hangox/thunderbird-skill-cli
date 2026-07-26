@@ -1,0 +1,45 @@
+[
+  {
+    "namespace": "thunderbirdSkillBridge",
+    "description": "Thunderbird Skill CLI Phase 1 本地回环桥",
+    "functions": [
+      {
+        "name": "start",
+        "type": "function",
+        "async": true,
+        "parameters": []
+      },
+      {
+        "name": "getState",
+        "type": "function",
+        "async": true,
+        "parameters": []
+      },
+      {
+        "name": "beginPairing",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          { "name": "clientId", "type": "string" },
+          { "name": "publicKeyAlgorithm", "type": "string", "enum": ["Ed25519"] },
+          { "name": "publicKeySpkiBase64", "type": "string" }
+        ]
+      },
+      {
+        "name": "confirmPairing",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          { "name": "intentId", "type": "string" },
+          { "name": "code", "type": "string" }
+        ]
+      },
+      {
+        "name": "revokePairing",
+        "type": "function",
+        "async": true,
+        "parameters": []
+      }
+    ]
+  }
+]

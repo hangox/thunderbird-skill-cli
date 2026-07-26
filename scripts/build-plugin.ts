@@ -97,7 +97,7 @@ await writeFile(join(stagingRoot, "package.json"), `${JSON.stringify({
   description: rootPackage.description,
   type: "module",
   license: "Apache-2.0",
-  bin: { thunderbird: "./bin/thunderbird.js" },
+  bin: { thunderbird: "bin/thunderbird.js" },
   files: [".claude-plugin/", "skills/", "bin/", "dist/", "assets/", "README.md", "LICENSE", "NOTICE"],
   engines: rootPackage.engines,
   repository: { type: "git", url: "git+https://github.com/hangox/thunderbird-skill-cli.git" },

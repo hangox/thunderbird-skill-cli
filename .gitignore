@@ -1,9 +1,11 @@
 # 依赖
 node_modules/
 
-# 构建生成物（可由 `npm run build` 完整重建，不入库）
-# 该模式同时覆盖 dist/ 与 extension/dist/
+# 构建生成物（可由 `npm run build` / `npm run build:plugin` 完整重建，不入库）
+# dist/ 同时覆盖 dist/ 与 extension/dist/；build/ 是发布 staging 目录
 dist/
+build/
+*.tgz
 *.tsbuildinfo
 coverage/
 

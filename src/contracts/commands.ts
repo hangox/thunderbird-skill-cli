@@ -12,6 +12,8 @@ export const COMMANDS: readonly CommandSpec[] = [
   { path: ["doctor"], summary: "诊断扩展、配对、版本和本地传输", risk: "read", phase: "phase-1" },
   { path: ["setup"], summary: "执行首次配对或重新配对", risk: "reversible", phase: "phase-1" },
   { path: ["status"], summary: "显示 Thunderbird 实例和会话状态", risk: "read", phase: "phase-1" },
+  { path: ["xpi", "path"], summary: "输出随包分发的扩展 XPI 路径", risk: "read", phase: "phase-1" },
+  { path: ["xpi", "reveal"], summary: "在 Finder 中定位该 XPI（仅 macOS）", risk: "read", phase: "phase-1" },
   { path: ["accounts", "list"], summary: "列出扩展授权的账号与发件身份", risk: "read", phase: "phase-2" },
   { path: ["folders", "list"], summary: "列出邮件文件夹", risk: "read", phase: "phase-2" },
   { path: ["search"], summary: "搜索邮件元数据与预览", risk: "read", phase: "phase-2" },

@@ -126,6 +126,45 @@ npm test
 
 设计研究基于本机第三方仓库 `$PROJ_DIR_THIRD/thunderbird-mcp` 的真实源码与测试。新项目不复制其 MCP bridge、JSON-RPC 分发或工具 schema；后续若复用 Mozilla `httpd.sys.mjs` 等 MPL-2.0 文件，必须保留相应许可证与修改说明。当前骨架未复制第三方源码。
 
+## 安装（Claude Code 插件）
+
+```bash
+# 1) 添加 marketplace（本仓库根目录即 marketplace）
+/plugin marketplace add hangox/thunderbird-skill-cli
+
+# 2) 安装插件；Skill、CLI 与扩展 XPI 随包一并提供
+/plugin install thunderbird@hangox-tools
+```
+
+安装后 Skill 以 `thunderbird` 命名空间提供，Claude 也可按任务上下文自动触发。
+
+扩展 XPI 随 npm 包分发，安装后用 CLI 定位：
+
+```bash
+thunderbird --human xpi path      # 输出 XPI 绝对路径
+thunderbird xpi reveal            # 在 Finder 中定位（仅 macOS）
+```
+
+随后在 Thunderbird 中手动安装该 XPI。**CLI 不会自动安装扩展，也不会绕过 Thunderbird 的任何确认步骤。**
+
+## 发布（维护者）
+
+发布物是独立的 staging 包（`build/plugin`），与开发仓库分离；开发仓库保持私有。
+
+```bash
+npm run release:check   # check + 全量测试 + 构建 staging + tarball 审计
+npm run validate:plugin # 官方 claude plugin validate 校验两份 manifest
+npm run pack:dry-run    # 查看将要发布的文件清单
+```
+
+推送 `v<版本>` tag 触发 `release.yml`，经 npm trusted publishing（OIDC）发布，仓库内不存放任何 npm token。
+
+**首次发布前需要人工完成（无法由 CI 代劳）：**
+
+1. 在 npmjs.com 创建 `@hangox` scope，并确认账号有该 scope 的发布权限。
+2. 在 npmjs.com 为该包配置 Trusted Publisher：填写 GitHub 组织/用户名、仓库名、workflow 文件名（`release.yml`）。
+3. 首次发布的 scoped 公开包需要 `--access public`（已写入 `publishConfig`）。
+
 ## 威胁模型与残余风险（规范表述）
 
 ### 明确 out-of-scope：同一 macOS 用户会话内的恶意进程

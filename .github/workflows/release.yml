@@ -1,0 +1,69 @@
+name: Release
+
+# 由 v* tag 触发。发布前重跑全部门禁，任何一项失败都不会走到 publish。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: macos-latest
+    permissions:
+      # OIDC trusted publishing 的唯一必需权限；仓库内不存放任何 npm token
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # npm trusted publishing 要求 Node >= 22.14.0
+          node-version: '22.14.0'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 升级 npm 到支持 trusted publishing 的版本
+        # 官方要求 npm >= 11.5.1
+        run: npm install -g npm@latest
+
+      - name: 确认 npm 版本满足要求
+        run: |
+          npm --version
+          node -e "const v=process.env.npm_config_user_agent||'';console.log(v)"
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run check
+
+      - name: 全量测试
+        run: npm test
+
+      - name: 构建 plugin staging
+        run: npm run build:plugin
+
+      - name: 校验 plugin 与 marketplace manifest
+        run: |
+          npx --yes @anthropic-ai/claude-code@latest plugin validate ./build/plugin
+          npx --yes @anthropic-ai/claude-code@latest plugin validate .
+
+      - name: tarball 审计
+        run: npm run audit:package
+
+      - name: 校验 tag 与包版本一致
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(node -p "require('./build/plugin/package.json').version")
+          if [ "$TAG" != "$PKG" ]; then
+            echo "tag ($TAG) 与包版本 ($PKG) 不一致"; exit 1
+          fi
+          echo "版本一致：$PKG"
+
+      - name: 发布到 npm（OIDC trusted publishing，无 token）
+        # 不设置 NODE_AUTH_TOKEN：认证完全依赖 id-token。
+        # provenance 由 npm 在受支持的 CI 上自动生成，此处不强制传 --provenance。
+        run: npm publish
+        working-directory: build/plugin

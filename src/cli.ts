@@ -3,6 +3,7 @@ import { COMMANDS, findCommand } from "./contracts/commands.js";
 import { CLI_SCHEMA_VERSION, createRequestId, type ErrorCode, type ErrorEnvelope, type SuccessEnvelope } from "./contracts/envelope.js";
 import { createSigningIdentityInKeychain, loadSigningIdentityFromKeychain } from "./auth.js";
 import { discoverInstances, DiscoveryError, type DiscoveredInstance } from "./discovery.js";
+import { locateXpi, revealInFinder, XPI_FILE_NAME } from "./xpi.js";
 import { beginPairing, fetchStatus, TransportError } from "./transport.js";
 
 const EXIT = { OK: 0, USAGE: 2, NOT_READY: 3, AUTH: 4, POLICY: 5, NOT_FOUND: 6, TEMPORARY: 7, INTERNAL: 10 } as const;
@@ -186,6 +187,19 @@ async function runDoctor(options: GlobalOptions, startedAt: number): Promise<nev
   return emitSuccess("doctor", { healthy, deep, checks }, options.human, startedAt, healthy ? [] : ["诊断发现未通过项目；未访问任何邮件数据"]);
 }
 
+async function runXpi(action: "path" | "reveal", options: GlobalOptions, startedAt: number): Promise<never> {
+  const located = await locateXpi();
+  if (!located) throw new DiscoveryError("E_VALIDATION", "未找到随包分发的扩展 XPI；请确认安装完整");
+  if (action === "path") {
+    // --human 时只打印裸路径，方便直接 shell 传参
+    if (options.human) { process.stdout.write(`${located.path}\n`); process.exit(EXIT.OK); }
+    return emitSuccess("xpi path", { path: located.path, bytes: located.bytes, fileName: XPI_FILE_NAME }, false, startedAt);
+  }
+  const revealed = await revealInFinder(located.path);
+  return emitSuccess("xpi reveal", { path: located.path, revealed, platform: process.platform }, options.human, startedAt,
+    revealed ? ["已在 Finder 中定位 XPI；安装仍需你在 Thunderbird 内显式确认"] : ["无法调用 Finder（非 macOS 或调用失败）；请手动打开上述路径"]);
+}
+
 async function main(): Promise<void> {
   const startedAt = Date.now();
   let options: GlobalOptions;
@@ -213,6 +227,8 @@ async function main(): Promise<void> {
     if (command === "status") await runStatus(options, startedAt);
     if (command === "doctor") await runDoctor(options, startedAt);
     if (command === "setup") await runSetup(options, startedAt);
+    if (command === "xpi path") await runXpi("path", options, startedAt);
+    if (command === "xpi reveal") await runXpi("reveal", options, startedAt);
     return emitError(command, "E_NOT_IMPLEMENTED", "该命令尚未进入当前 Phase 1 compatibility spike", false, options.human);
   } catch (error) {
     if (error instanceof DiscoveryError) return emitError(command, error.code, error.message, false, options.human);

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -301,9 +301,18 @@ test("setup --reconfigure 在服务端 unpaired 时复用旧 identity 发起配�
   assert.equal(loaded?.publicKeySpkiBase64, created.publicKeySpkiBase64);
 });
 
-test("phase registry 仅将 doctor/setup/status 标为 phase-1", async () => {
+test("phase-1 仅含不访问邮件的诊断/配对/安装辅助命令", async () => {
   const { COMMANDS } = await import("../dist/contracts/commands.js");
-  assert.deepEqual(COMMANDS.filter((command) => command.phase === "phase-1").map((command) => command.path.join(" ")), ["doctor", "setup", "status"]);
+  const phase1 = COMMANDS.filter((command) => command.phase === "phase-1").map((command) => command.path.join(" "));
+  // xpi path/reveal 是纯本地安装辅助：只读、不触达 Thunderbird、不访问任何邮件数据。
+  assert.deepEqual(phase1.sort(), ["doctor", "setup", "status", "xpi path", "xpi reveal"]);
+  // 边界不变式：任何触达邮件/日历/草稿的命令都不得进入 phase-1。
+  const mailish = /^(accounts|folders|search|message|recent|draft|attachments|calendar|watch)\b/;
+  for (const path of phase1) assert.doesNotMatch(path, mailish, `${path} 不应属于 phase-1`);
+  // phase-1 命令风险等级只能是只读或可逆，绝不允许 external/destructive。
+  for (const command of COMMANDS.filter((c) => c.phase === "phase-1")) {
+    assert.ok(["read", "reversible"].includes(command.risk), `${command.path.join(" ")} 风险等级 ${command.risk}`);
+  }
 });
 
 test("E_PAIRING_CHANGED 映射为 exit 7、保留机器码与恢复提示，且写操作不自动重试", async (t) => {
@@ -366,4 +375,58 @@ test("descriptor 的 pairingEpoch 缺失或格式非法时 CLI 拒绝该实例",
     assert.equal(result.status, 2, JSON.stringify(variant));
     assert.equal(JSON.parse(result.stdout).error.code, "E_VALIDATION", JSON.stringify(variant));
   }
+});
+
+test("xpi path 在开发仓库布局下解析到冻结 XPI 且保持 Phase 1 边界", async () => {
+  const result = await execFileAsync(process.execPath, [cli.pathname, "--json", "xpi", "path"], { encoding: "utf8" });
+  const envelope = JSON.parse(result.stdout);
+  assert.equal(envelope.ok, true);
+  assert.equal(envelope.command, "xpi path");
+  assert.equal(envelope.data.fileName, "thunderbird-skill-bridge.xpi");
+  const [{ createHash }, { readFile }] = await Promise.all([import("node:crypto"), import("node:fs/promises")]);
+  const packaged = createHash("sha256").update(await readFile(envelope.data.path)).digest("hex");
+  const frozen = createHash("sha256").update(await readFile(new URL("../thunderbird-skill-bridge-phase1.xpi", import.meta.url))).digest("hex");
+  assert.equal(packaged, frozen, "xpi path 必须指向仓库冻结件");
+});
+
+test("xpi path --human 只输出裸路径，便于 shell 传参", async () => {
+  const result = await execFileAsync(process.execPath, [cli.pathname, "--human", "xpi", "path"], { encoding: "utf8" });
+  assert.equal(result.stdout.trim().endsWith("thunderbird-skill-bridge-phase1.xpi"), true);
+  assert.equal(result.stdout.trim().split("\n").length, 1);
+});
+
+test("xpi 命令不接受未知参数，且未越出 Phase 1 命令边界", async () => {
+  for (const args of [["xpi", "path", "--install"], ["xpi", "reveal", "--force"], ["xpi", "install"]]) {
+    const result = spawnSync(process.execPath, [cli.pathname, "--json", ...args], { encoding: "utf8" });
+    assert.notEqual(result.status, 0, args.join(" "));
+    const envelope = JSON.parse(result.stdout);
+    assert.ok(["E_VALIDATION", "E_USAGE"].includes(envelope.error.code), `${args.join(" ")} -> ${envelope.error.code}`);
+  }
+});
+
+test("xpi 解析不依赖 cwd，且候选路径不引用包外目录", async () => {
+  const { xpiCandidatePaths } = await import("../dist/xpi.js");
+  const candidates = xpiCandidatePaths("file:///opt/pkg/dist/xpi.js");
+  assert.deepEqual(candidates, [
+    "/opt/pkg/assets/thunderbird-skill-bridge.xpi",
+    "/opt/assets/thunderbird-skill-bridge.xpi",
+    "/opt/pkg/thunderbird-skill-bridge-phase1.xpi",
+  ]);
+  for (const p of candidates) assert.equal(p.includes(".."), false, "候选路径不得含有未解析的 ..");
+  // 从任意 cwd 调用结果一致
+  const a = await execFileAsync(process.execPath, [cli.pathname, "--human", "xpi", "path"], { encoding: "utf8", cwd: "/" });
+  const b = await execFileAsync(process.execPath, [cli.pathname, "--human", "xpi", "path"], { encoding: "utf8", cwd: tmpdir() });
+  assert.equal(a.stdout, b.stdout);
+});
+
+test("CLI 不提供任何自动安装 XPI 或绕过 Thunderbird 确认的路径", async () => {
+  const [cliSource, xpiSource] = await Promise.all([
+    readFile(new URL("../src/cli.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/xpi.ts", import.meta.url), "utf8"),
+  ]);
+  const combined = `${cliSource}\n${xpiSource}`;
+  // 不得出现安装/启动 Thunderbird 或写入其 profile 的手段
+  assert.doesNotMatch(combined, /xpinstall|installAddon|AddonManager|\bthunderbird\.app|open\s+-a/i);
+  // reveal 只允许 open -R（在 Finder 中定位），不得是 open 直接打开文件
+  assert.match(xpiSource, /"\/usr\/bin\/open", \["-R", path\]/);
 });

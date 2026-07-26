@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    # 需要 macOS：Keychain / codesign / Finder 相关测试在 Linux 上会被跳过或不成立
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # npm trusted publishing 要求 Node >= 22.14.0；CI 与 release 保持同一基线
+          node-version: '22.14.0'
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run check
+
+      - name: 全量测试
+        run: npm test
+
+      - name: 专项测试
+        run: |
+          npm run test:transport
+          npm run test:security
+          npm run test:extension
+
+      - name: 构建 plugin staging
+        run: npm run build:plugin
+
+      - name: 校验 plugin 与 marketplace manifest
+        # 用 npx 拉取 Claude Code CLI 做官方 schema 校验；失败即视为 CI 失败
+        run: |
+          npx --yes @anthropic-ai/claude-code@latest plugin validate ./build/plugin
+          npx --yes @anthropic-ai/claude-code@latest plugin validate .
+
+      - name: npm pack dry-run
+        run: npm pack --dry-run
+        working-directory: build/plugin
+
+      - name: tarball 审计（白名单 + 敏感扫描 + 版本一致性）
+        run: npm run audit:package

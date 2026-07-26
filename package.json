@@ -24,7 +24,12 @@
     "test:transport": "npm run build && node --test test/transport.test.mjs",
     "test:security": "npm run build && node --test test/discovery.test.mjs test/auth.test.mjs test/non-mcp.test.mjs test/experiment-handler.test.mjs",
     "cli": "node dist/cli.js",
-    "test:extension": "npm run build && node --test test/extension.test.mjs test/experiment-handler.test.mjs"
+    "test:extension": "npm run build && node --test test/extension.test.mjs test/experiment-handler.test.mjs",
+    "build:plugin": "npm run build && npm run package:extension && node scripts/build-plugin.ts",
+    "validate:plugin": "claude plugin validate ./build/plugin && claude plugin validate .",
+    "audit:package": "node scripts/audit-package.ts",
+    "pack:dry-run": "npm pack --dry-run --prefix build/plugin",
+    "release:check": "npm run check && npm test && npm run build:plugin && npm run audit:package"
   },
   "engines": {
     "node": ">=22.0.0"

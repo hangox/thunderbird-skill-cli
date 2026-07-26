@@ -195,3 +195,9 @@ npm run pack:dry-run    # 查看将要发布的文件清单
 ### 环境未验证项
 
 UI confirm → receipt → signed status 的**真实 GUI 链路**在本轮未获独立复验：自动化 GUI 核验依赖 Dexter 的 Accessibility 与 Screen Recording 权限，该权限在当前环境不可用。因此该链路标记为**环境未验证（environment-blocked）**，而不是已验证通过。所有非 GUI 环节均由执行级自动化测试覆盖。
+
+## 许可证与商标
+
+本项目根据 [Apache License 2.0](LICENSE) 授权（Copyright 2026 HangoX）。第三方组件说明见 [NOTICE](NOTICE)：本包运行时依赖为 0，仅使用 Node.js 内置模块。
+
+Mozilla、Thunderbird 及相关名称与标识是 Mozilla Foundation 的商标。**本项目是独立的第三方工具，与 Mozilla Foundation 无任何隶属、赞助或背书关系**；引用相关名称仅为说明与 Thunderbird 的互操作用途。

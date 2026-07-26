@@ -3,6 +3,7 @@
   "version": "0.2.0",
   "private": true,
   "description": "面向 Claude Code Skill 的 Thunderbird 原生本地 CLI 与专用扩展 Phase 1 compatibility spike",
+  "license": "Apache-2.0",
   "type": "module",
   "bin": {
     "thunderbird": "./dist/cli.js"

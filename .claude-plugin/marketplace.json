@@ -12,10 +12,10 @@
       "name": "thunderbird",
       "source": {
         "source": "npm",
-        "package": "@hangox/thunderbird",
+        "package": "@hangox/thunderbird-skill-cli",
         "version": "0.2.0"
       },
-      "description": "按需加载的 Thunderbird Skill：通过一次性本地 CLI 访问专用 Thunderbird 扩展，不注册常驻 MCP server。",
+      "description": "按需加载的 Thunderbird Skill：通过一次性本地 CLI 访问专用 Thunderbird 扩展，不注册常驻 MCP server。（独立第三方工具，与 Mozilla Foundation 无隶属关系）",
       "version": "0.2.0",
       "author": {
         "name": "hangox",
@@ -33,7 +33,8 @@
       "tags": [
         "thunderbird",
         "email"
-      ]
+      ],
+      "license": "Apache-2.0"
     }
   ]
 }

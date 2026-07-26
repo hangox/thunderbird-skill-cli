@@ -86,17 +86,19 @@ await writeFile(join(stagingRoot, ".claude-plugin", "plugin.json"), `${JSON.stri
   author: { name: "hangox", url: "https://github.com/hangox" },
   homepage: "https://github.com/hangox/thunderbird-skill-cli",
   repository: "https://github.com/hangox/thunderbird-skill-cli",
+  license: "Apache-2.0",
   keywords: ["thunderbird", "email", "cli", "skill"],
 }, null, 2)}\n`);
 
 // ---- 6. 发布用 package.json：与开发包分离，files 为显式白名单
 await writeFile(join(stagingRoot, "package.json"), `${JSON.stringify({
-  name: "@hangox/thunderbird",
+  name: "@hangox/thunderbird-skill-cli",
   version,
   description: rootPackage.description,
   type: "module",
+  license: "Apache-2.0",
   bin: { thunderbird: "./bin/thunderbird.js" },
-  files: [".claude-plugin/", "skills/", "bin/", "dist/", "assets/", "README.md"],
+  files: [".claude-plugin/", "skills/", "bin/", "dist/", "assets/", "README.md", "LICENSE", "NOTICE"],
   engines: rootPackage.engines,
   repository: { type: "git", url: "git+https://github.com/hangox/thunderbird-skill-cli.git" },
   homepage: "https://github.com/hangox/thunderbird-skill-cli",
@@ -108,6 +110,9 @@ await writeFile(join(stagingRoot, "package.json"), `${JSON.stringify({
 }, null, 2)}\n`);
 
 await cp(resolve(projectRoot, "README.md"), join(stagingRoot, "README.md"));
+// Apache-2.0 要求随分发附带 LICENSE 与 NOTICE
+await cp(resolve(projectRoot, "LICENSE"), join(stagingRoot, "LICENSE"));
+await cp(resolve(projectRoot, "NOTICE"), join(stagingRoot, "NOTICE"));
 
 // ---- 7. 输出清单与校验值
 const files = await listFiles(stagingRoot);

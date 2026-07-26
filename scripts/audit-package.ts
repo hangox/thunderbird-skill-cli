@@ -18,6 +18,8 @@ const stagingRoot = resolve(projectRoot, "build", "plugin");
 const ALLOWED_EXACT = new Set([
   "package.json",
   "README.md",
+  "LICENSE",
+  "NOTICE",
   ".claude-plugin/plugin.json",
   "bin/thunderbird.js",
   "assets/thunderbird-skill-bridge.xpi",

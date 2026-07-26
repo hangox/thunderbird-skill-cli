@@ -1,0 +1,21 @@
+Thunderbird Skill CLI
+Copyright 2026 HangoX
+
+本产品根据 Apache License, Version 2.0 授权分发。
+许可证全文见同目录下的 LICENSE 文件。
+
+第三方组件
+----------
+本发布包不包含任何第三方源码或二进制依赖：运行时依赖数为 0，
+CLI 仅使用 Node.js 内置模块（node:crypto、node:fs、node:http、
+node:path、node:os、node:child_process、node:url）。
+TypeScript 与 @types/node 仅为构建期 devDependency，不随包分发。
+
+因此本许可证仅覆盖本仓库自有代码，不对任何第三方代码作出授权主张。
+
+商标声明
+--------
+Mozilla、Thunderbird 及相关名称与标识是 Mozilla Foundation 的商标。
+本项目是**独立的第三方工具**，与 Mozilla Foundation 无任何隶属、
+赞助或背书关系。此处引用相关名称仅用于说明本工具与 Thunderbird 的
+互操作用途（指称性使用）。

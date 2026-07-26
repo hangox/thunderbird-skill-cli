@@ -211,6 +211,12 @@ XPI 的字节可复现性依赖 macOS `/usr/bin/zip`，因此必须在 macOS 上
 
 UI confirm → receipt → signed status 的**真实 GUI 链路**在本轮未获独立复验：自动化 GUI 核验依赖 Dexter 的 Accessibility 与 Screen Recording 权限，该权限在当前环境不可用。因此该链路标记为**环境未验证（environment-blocked）**，而不是已验证通过。所有非 GUI 环节均由执行级自动化测试覆盖。
 
+## 已知问题
+
+**`@hangox/thunderbird-skill-cli@0.2.0`**：`thunderbird --version` 会输出 JSON envelope 的 schema 版本 `1.0`，而不是包版本 `0.2.0`。
+
+影响范围仅限该命令的显示：协议版本、descriptor/status 自报的 `extensionVersion`、以及运行时行为均正确为 `0.2.0`，功能不受影响。0.2.1 起 `--version` 输出产品版本。建议升级到 0.2.1 或更高版本。
+
 ## 许可证与商标
 
 本项目根据 [Apache License 2.0](LICENSE) 授权（Copyright 2026 HangoX）。第三方组件说明见 [NOTICE](NOTICE)：本包运行时依赖为 0，仅使用 Node.js 内置模块。

@@ -4,7 +4,7 @@ import { PAIRING_EPOCH_PATTERN, type InstanceDescriptor } from "./discovery.js";
 import type { ErrorCode } from "./contracts/envelope.js";
 import { PUBLIC_KEY_ALGORITHM, signRequest, type PairingIdentity, type SigningIdentity } from "./auth.js";
 
-export const CLI_VERSION = "0.2.0";
+export const CLI_VERSION = "0.2.1";
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const CAPABILITIES = new Set(["mail.read.v1", "mail.reversible.v1", "draft.write.v1", "mail.send-confirmed.v1", "calendar.read.v1"]);
 

@@ -3,8 +3,8 @@
 const RESOURCE_NAME = "thunderbird-skill-bridge";
 const PROTOCOL_VERSION = 1;
 const DESCRIPTOR_VERSION = 2;
-const EXTENSION_VERSION = "0.2.0";
-const CLI_VERSION = "0.2.0";
+const EXTENSION_VERSION = "0.2.1";
+const CLI_VERSION = "0.2.1";
 const PAIRING_TTL_MS = 5 * 60 * 1000;
 const PAIRING_RECEIPT_TTL_MS = 2 * 60 * 1000;
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;

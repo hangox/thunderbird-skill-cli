@@ -262,7 +262,7 @@ test("S6 CLI 侧 descriptor/status 的 pairingEpoch 不一致会被拒绝", asyn
   const server = createServer((request, response) => {
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({
-      protocolVersion: 1, minCliVersion: "0.2.0", maxCliVersion: "0.2.0", extensionVersion: "0.2.0",
+      protocolVersion: 1, minCliVersion: "0.2.1", maxCliVersion: "0.2.1", extensionVersion: "0.2.1",
       instanceId: "inst_epochmismatch", profileId: `sha256:${"4".repeat(64)}`,
       capabilities: [], pairingState: "paired", pairingEpoch: "9", authorizedAccountRefs: [],
     }));
@@ -271,7 +271,7 @@ test("S6 CLI 侧 descriptor/status 的 pairingEpoch 不一致会被拒绝", asyn
   const { port } = server.address();
   const descriptor = {
     descriptorVersion: 2, protocolVersion: 1, instanceId: "inst_epochmismatch", profileId: `sha256:${"4".repeat(64)}`,
-    profileLabel: "Epoch Fixture", pid: process.pid, port, sessionToken: "5".repeat(64), extensionVersion: "0.2.0",
+    profileLabel: "Epoch Fixture", pid: process.pid, port, sessionToken: "5".repeat(64), extensionVersion: "0.2.1",
     pairingEpoch: "3", startedAt: "2026-07-25T00:00:00.000Z", expiresAt: "2099-07-25T01:00:00.000Z",
   };
   await assert.rejects(fetchStatus(descriptor, 1000), (error) => error.code === "E_PAIRING_CHANGED" && error.retryable === true);
@@ -454,13 +454,13 @@ test("S7 CLI 发送的 pairing body 恰好是三键常量", async () => {
   const { port } = server.address();
   await beginPairing({
     descriptorVersion: 2, protocolVersion: 1, instanceId: "inst_bodyshape01", profileId: `sha256:${"6".repeat(64)}`,
-    profileLabel: "Body Fixture", pid: process.pid, port, sessionToken: "7".repeat(64), extensionVersion: "0.2.0",
+    profileLabel: "Body Fixture", pid: process.pid, port, sessionToken: "7".repeat(64), extensionVersion: "0.2.1",
     pairingEpoch: "4", startedAt: "2026-07-25T00:00:00.000Z", expiresAt: "2099-07-25T01:00:00.000Z",
   }, 1000, identity);
   assert.deepEqual(Object.keys(seen.body).sort(), ["clientId", "publicKeyAlgorithm", "publicKeySpkiBase64"]);
   assert.equal(seen.body.publicKeyAlgorithm, "Ed25519");
   assert.equal(seen.headers["x-thunderbird-pairing-epoch"], "4");
-  assert.equal(seen.headers["x-thunderbird-client-version"], "0.2.0");
+  assert.equal(seen.headers["x-thunderbird-client-version"], "0.2.1");
   assert.equal(seen.headers["x-thunderbird-signature-algorithm"], undefined);
   assert.equal(createHash("sha256").update(JSON.stringify(seen.body)).digest("hex"), seen.headers["x-content-sha256"]);
   await new Promise((resolve) => server.close(resolve));
@@ -616,11 +616,11 @@ test("运行时 descriptor 与 status 自报的 extensionVersion 与发布版本
   await withHarness(t, async (harness) => {
     const identity = makeIdentity();
     await pair(harness, identity);
-    assert.equal(harness.descriptor().extensionVersion, "0.2.0");
+    assert.equal(harness.descriptor().extensionVersion, "0.2.1");
     const status = await handle(harness, buildRequest(harness, { identity }));
     assert.equal(status.status, 200);
-    assert.equal(status.body.extensionVersion, "0.2.0");
-    assert.equal(status.body.minCliVersion, "0.2.0");
-    assert.equal(status.body.maxCliVersion, "0.2.0");
+    assert.equal(status.body.extensionVersion, "0.2.1");
+    assert.equal(status.body.minCliVersion, "0.2.1");
+    assert.equal(status.body.maxCliVersion, "0.2.1");
   });
 });

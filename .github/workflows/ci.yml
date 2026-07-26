@@ -18,8 +18,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # npm trusted publishing 要求 Node >= 22.14.0；CI 与 release 保持同一基线
-          node-version: '22.14.0'
+          # 用 22.x 最新版：既满足 npm trusted publishing 的 >= 22.14.0，
+          # 也满足直接运行 .ts 构建脚本所需的原生类型剥离（Node >= 22.18）。
+          node-version: '22'
 
       - name: 安装依赖
         run: npm ci

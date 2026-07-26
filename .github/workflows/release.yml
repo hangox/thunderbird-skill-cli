@@ -18,7 +18,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.14.0'
+          # 22.x 最新版：同时满足 trusted publishing (>=22.14.0)
+          # 与原生 TypeScript 类型剥离 (>=22.18)
+          node-version: '22'
 
       - name: 安装依赖
         run: npm ci
@@ -69,8 +71,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # npm trusted publishing 要求 Node >= 22.14.0
-          node-version: '22.14.0'
+          # 22.x 最新版：满足 trusted publishing (>=22.14.0) 与原生 .ts 支持 (>=22.18)
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
       - name: 升级 npm 到支持 trusted publishing 的版本（>= 11.5.1）

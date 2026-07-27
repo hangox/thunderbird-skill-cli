@@ -309,12 +309,17 @@ async function runDraftSend(parsed: ParsedCommandArguments, options: GlobalOptio
 // attachments save：授权（attachments.save）+ 循环分块拉取（attachments.fetch）
 // + 本机安全落盘（src/paths.ts）。
 //
-// 响应字段名（name/contentType/size/digest/fetchToken；attachments.fetch 的
-// chunk/cursor）是本命令行层面按 contracts/routes.ts 冻结的常量与既有
-// digest 约定（"sha256:<hex>"，与 draft send 的 draftRevision 一致）推导出的
-// 约定，不是业务 schema 的权威来源——扩展侧尚未实现这两条 route 的真实
-// handler（Task #29/#30 之外的独立后续任务）；一旦落地，如字段命名不同，只
-// 需要调整本文件这一小段解析/构造逻辑，不影响 CLI 外壳其余部分。
+// 响应形状与 extension/src/mail/attachments-write.ts 的真实 handler（Task
+// #30/mail-write，team-lead/Opus 裁决冻结）逐字段对齐：
+// - attachments.save：{ attachmentRef, name, contentType, size,
+//   digest: "sha256:<hex>", fetchToken, expiresAt }。
+// - attachments.fetch：{ name, contentType, chunkBase64, offset, chunkBytes,
+//   totalBytes, done, nextCursor? }——nextCursor 只在 done=false 时存在；
+//   offset 是本块在原始字节流中的起始偏移，chunkBytes 是解码后（不是
+//   base64 编码后）字节数，totalBytes 每次响应都必须与 attachments.save
+//   声明的 size 一致。CLI 侧据此维护一个显式的 offset 状态机，而不是仅凭
+//   "cursor 是否变化"判断进度——offset/chunkBytes 让"服务端谎报进度"这类
+//   协议违规在写入前就能被精确拒绝。
 // ---------------------------------------------------------------------------
 
 interface AttachmentsSaveAuthorization {
@@ -338,7 +343,11 @@ function parseAttachmentsSaveAuthorization(value: unknown): AttachmentsSaveAutho
 
 interface AttachmentsFetchChunk {
   readonly chunkBase64: string;
-  readonly nextCursor: string | null;
+  readonly offset: number;
+  readonly chunkBytes: number;
+  readonly totalBytes: number;
+  readonly done: boolean;
+  readonly nextCursor: string | undefined;
 }
 
 const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
@@ -346,12 +355,31 @@ const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
 function parseAttachmentsFetchChunk(value: unknown): AttachmentsFetchChunk {
   if (typeof value !== "object" || value === null) throw new TransportError("E_VALIDATION", "attachments.fetch 响应格式不合法");
   const record = value as Record<string, unknown>;
-  if (typeof record.chunk !== "string" || !BASE64_PATTERN.test(record.chunk)) throw new TransportError("E_VALIDATION", "attachments.fetch 响应 chunk 不是合法 base64");
-  if (record.cursor !== null && typeof record.cursor !== "string") throw new TransportError("E_VALIDATION", "attachments.fetch 响应 cursor 不合法");
-  return { chunkBase64: record.chunk, nextCursor: record.cursor as string | null };
+  if (typeof record.chunkBase64 !== "string" || !BASE64_PATTERN.test(record.chunkBase64)) {
+    throw new TransportError("E_VALIDATION", "attachments.fetch 响应 chunkBase64 不是合法 base64");
+  }
+  if (!Number.isInteger(record.offset) || (record.offset as number) < 0) throw new TransportError("E_VALIDATION", "attachments.fetch 响应 offset 不合法");
+  if (!Number.isInteger(record.chunkBytes) || (record.chunkBytes as number) < 0) throw new TransportError("E_VALIDATION", "attachments.fetch 响应 chunkBytes 不合法");
+  if (!Number.isInteger(record.totalBytes) || (record.totalBytes as number) < 0) throw new TransportError("E_VALIDATION", "attachments.fetch 响应 totalBytes 不合法");
+  if (typeof record.done !== "boolean") throw new TransportError("E_VALIDATION", "attachments.fetch 响应 done 不合法");
+  // done/nextCursor 互斥：done=true 时绝不允许出现 nextCursor（意味着"还有更多"），
+  // done=false 时必须有合法 nextCursor（否则调用方无法续取，会卡死）。
+  if (record.done) {
+    if (record.nextCursor !== undefined) throw new TransportError("E_VALIDATION", "attachments.fetch 响应 done=true 时不应携带 nextCursor");
+  } else if (typeof record.nextCursor !== "string" || record.nextCursor.length === 0) {
+    throw new TransportError("E_VALIDATION", "attachments.fetch 响应 done=false 时必须携带合法 nextCursor");
+  }
+  return {
+    chunkBase64: record.chunkBase64,
+    offset: record.offset as number,
+    chunkBytes: record.chunkBytes as number,
+    totalBytes: record.totalBytes as number,
+    done: record.done,
+    nextCursor: record.done ? undefined : (record.nextCursor as string),
+  };
 }
 
-/** 附件原始总大小不可能超过这个块数（每块至少推进一些进度）；防止扩展异常/恶意场景下 cursor 永不为 null 造成无限轮询。 */
+/** 附件原始总大小不可能超过这个块数（每块至少推进一些进度）；防止扩展异常/恶意场景下 done 永不为 true 造成无限轮询。 */
 const MAX_ATTACHMENT_FETCH_ITERATIONS = 20_000;
 
 async function runAttachmentsSave(parsed: ParsedCommandArguments, options: GlobalOptions, startedAt: number): Promise<never> {
@@ -387,32 +415,43 @@ async function runAttachmentsSave(parsed: ParsedCommandArguments, options: Globa
   // 一次授权+网络往返。
   const handle = await openAttachmentTempFile(directory, metadata.name);
   try {
-    let cursor: string | null = null;
-    let first = true;
-    let totalDecodedBytes = 0;
+    // cursor === undefined 表示"首次请求，不带 cursor"（fetchToken 刚签发，
+    // 服务端要求首次拉取不得携带 cursor，见 attachments-write.ts）；
+    // expectedOffset 是 CLI 侧独立维护的进度状态机，不依赖服务端"cursor 是否
+    // 变化"这种弱信号——offset/chunkBytes 让谎报进度的响应在写入前就能被拒绝。
+    let cursor: string | undefined;
+    let expectedOffset = 0;
+    let done = false;
     let iterations = 0;
-    while (first || cursor !== null) {
-      first = false;
+    while (!done) {
       iterations += 1;
       if (iterations > MAX_ATTACHMENT_FETCH_ITERATIONS) throw new TransportError("E_TIMEOUT", "附件分块拉取轮询次数超过安全上限", false);
-      const requestedCursor: string | null = cursor;
-      const body: Record<string, unknown> = { fetchToken: metadata.fetchToken, ...(requestedCursor !== null ? { cursor: requestedCursor } : {}) };
+      const body: Record<string, unknown> = { fetchToken: metadata.fetchToken, ...(cursor !== undefined ? { cursor } : {}) };
       const response = await callMailRoute(instance.descriptor, fetchRoute, body, options.timeoutMs, identity);
       const chunk = parseAttachmentsFetchChunk(response);
-      // 服务端返回的下一个 cursor 与本次请求所用的 cursor 完全相同，说明没有
-      // 任何进展（重放或异常响应），必须失败关闭，否则会无限轮询。
-      if (chunk.nextCursor !== null && chunk.nextCursor === requestedCursor) {
-        throw new TransportError("E_VALIDATION", "attachments.fetch 返回的 cursor 未推进，疑似重放或异常响应");
+
+      if (chunk.totalBytes !== metadata.size) {
+        throw new TransportError("E_VALIDATION", "attachments.fetch 响应 totalBytes 与 attachments.save 声明的 size 不一致");
       }
-      if (chunk.chunkBase64.length > 0) {
-        if (Buffer.byteLength(chunk.chunkBase64, "utf8") > ATTACHMENT_FETCH_MAX_CHUNK_ENCODED_BYTES) {
-          throw new TransportError("E_VALIDATION", "attachments.fetch 单块 base64 长度超过契约硬上限");
-        }
-        const decoded = Buffer.from(chunk.chunkBase64, "base64");
-        totalDecodedBytes += decoded.length;
-        if (totalDecodedBytes > metadata.size) throw new TransportError("E_VALIDATION", "附件实际拉取字节超过声明大小");
-        await handle.write(decoded);
+      if (chunk.offset !== expectedOffset) {
+        throw new TransportError("E_VALIDATION", `attachments.fetch 响应 offset 不连续：期望 ${expectedOffset}，实际 ${chunk.offset}`);
       }
+      if (!chunk.done && chunk.chunkBytes === 0) {
+        // 未完成却没有任何进展：要么是协议异常，要么会导致无限轮询，必须拒绝。
+        throw new TransportError("E_VALIDATION", "attachments.fetch 响应未完成但本块 0 字节，拒绝以避免无限轮询");
+      }
+      if (Buffer.byteLength(chunk.chunkBase64, "utf8") > ATTACHMENT_FETCH_MAX_CHUNK_ENCODED_BYTES) {
+        throw new TransportError("E_VALIDATION", "attachments.fetch 单块 base64 长度超过契约硬上限");
+      }
+      const decoded = Buffer.from(chunk.chunkBase64, "base64");
+      if (decoded.length !== chunk.chunkBytes) {
+        throw new TransportError("E_VALIDATION", "attachments.fetch 响应 chunkBytes 与实际解码字节数不一致");
+      }
+      expectedOffset += chunk.chunkBytes;
+      if (expectedOffset > metadata.size) throw new TransportError("E_VALIDATION", "附件实际拉取字节超过声明大小");
+      if (decoded.length > 0) await handle.write(decoded);
+
+      done = chunk.done;
       cursor = chunk.nextCursor;
     }
     const result = await handle.finish({ totalBytes: metadata.size, sha256Digest: metadata.digest });

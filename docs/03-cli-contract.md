@@ -244,9 +244,9 @@ undo token 只能恢复该操作，短期有效、一次性使用，并绑定 in
 `directory` 只在 CLI 本地使用，从不发送给扩展。CLI 依次：
 
 1. 调用 `attachments.save` route 用 `attachmentRef` 换取元数据（`name`/`contentType`/`size`/`digest`）与一次性 `fetchToken`；扩展不接收也不校验任何本机路径，原始附件总大小超过硬上限时直接拒绝签发 token。
-2. 用 `fetchToken` 循环调用 `attachments.fetch`，以不透明 `cursor` 严格单调续取 JSON 内联 base64 分块，直至 `cursor` 为 `null`；乱序/重放/未推进的 `cursor` 一律失败关闭。
+2. 用 `fetchToken` 循环调用 `attachments.fetch`；每次响应是 `{ chunkBase64, offset, chunkBytes, totalBytes, done, nextCursor? }`——`nextCursor` 只在 `done=false` 时存在。CLI 维护独立的 `expectedOffset` 状态机：`offset` 必须等于 `expectedOffset`（不连续即拒绝）、`chunkBytes` 必须等于实际解码字节数、`totalBytes` 全程必须与 `attachments.save` 声明的 `size` 一致、`done=false` 时禁止零字节块（防止无限轮询）、`done`/`nextCursor` 必须互斥。任一违规都失败关闭。
 3. 在目标同目录以 `O_NOFOLLOW|O_EXCL` 创建临时文件，边拉取边写入；全部写完后校验总长度与 `sha256` 摘要，用 `link()`（而非会静默覆盖的 `rename()`）原子发布到最终文件名（取自附件自身名称，规范化、不解释为路径），已存在则拒绝（no-clobber）。
-4. 任何一步失败（长度/摘要不符、`cursor` 异常、token 过期/复用/跨 client、网络中断）都清理临时文件，不留下半成品；已存在的文件不会被覆盖。
+4. 任何一步失败（长度/摘要不符、offset/chunkBytes/totalBytes/done 状态机违规、token 过期/复用/跨 client、网络中断）都清理临时文件，不留下半成品；已存在的文件不会被覆盖。
 
 目标目录必须是绝对路径、真实存在、解析后不落在敏感系统路径、不是设备/管道/套接字文件；相对路径与路径穿越一律拒绝。
 

@@ -38,6 +38,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   { path: ["attachments", "list"], summary: "列出附件元数据", risk: "read", phase: "phase-2" },
   { path: ["attachments", "save"], summary: "保存附件到显式目标目录", risk: "reversible", phase: "phase-2" },
   { path: ["operations", "get"], summary: "查询可逆/外发操作的当前状态", risk: "read", phase: "phase-2" },
+  { path: ["undo"], summary: "使用可逆操作返回的 undo token 撤销该操作", risk: "reversible", phase: "phase-2" },
   { path: ["calendar", "list"], summary: "列出日历", risk: "read", phase: "future" },
   { path: ["calendar", "events"], summary: "查询日历事件", risk: "read", phase: "future" },
   { path: ["watch"], summary: "以 JSONL 输出有限事件流", risk: "read", phase: "future" },

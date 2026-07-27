@@ -19,6 +19,12 @@ import { test } from "node:test";
 import { promisify } from "node:util";
 import vm from "node:vm";
 import { buildBundle } from "../scripts/bundle-background.ts";
+import { MAIL_ROUTES } from "../dist/contracts/routes.js";
+
+// 从真实的 route 表派生 mock 的 listMailRoutes() 返回值，而不是在测试里
+// 手写第二份 route id 列表——否则每次 routes.ts 新增 route 都要记得同步改
+// 这里，历史上已经因为忘记同步而假失败过一次。
+const ALL_ROUTE_IDS = MAIL_ROUTES.map((route) => route.id);
 
 const execFileAsync = promisify(execFile);
 const projectRoot = new URL("..", import.meta.url).pathname;
@@ -105,11 +111,7 @@ function createSandbox() {
           serviceStarted: true, port: 49_152, descriptorPath: "/tmp/x", instanceId: "inst_x", profileId: `sha256:${"0".repeat(64)}`,
           pairingState: "unpaired", pairingEpoch: "0", clientId: null, pendingIntentId: null, pendingCode: null, pendingClientId: null, pendingExpiresAt: null, error: null,
         }),
-        listMailRoutes: async () => [
-          "accounts.list", "folders.list", "messages.search", "messages.recent", "messages.get", "messages.open",
-          "messages.mark", "messages.move", "messages.trash", "attachments.list", "attachments.save",
-          "drafts.create", "drafts.update", "drafts.open", "drafts.send.prepare", "drafts.send.confirm", "operations.get",
-        ],
+        listMailRoutes: async () => ALL_ROUTE_IDS,
         onOperation: { addListener: (fn) => { operationListener = fn; } },
         onPairingRevoked: { addListener: (fn) => { pairingRevokedListener = fn; } },
         respondToOperation: async (token, resultJson) => { responded.push({ token, result: JSON.parse(resultJson) }); },

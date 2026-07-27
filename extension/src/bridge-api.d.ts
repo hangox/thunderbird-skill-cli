@@ -7,6 +7,8 @@ interface ThunderbirdSkillBridgeState {
   pairingState: "unpaired" | "pairing" | "paired" | "revoked";
   pairingEpoch: string;
   clientId: string | null;
+  /** 当前已配对 client 的 capability 集合；未配对时恒为 []。写入方式见 setMailCapabilities。 */
+  capabilities: readonly string[];
   pendingIntentId: string | null;
   pendingCode: string | null;
   pendingClientId: string | null;
@@ -46,7 +48,7 @@ interface ThunderbirdSkillBridgeApi {
     removeListener(listener: PairingRevokedListener): void;
     hasListener(listener: PairingRevokedListener): boolean;
   };
-  /** 账号/能力授权 UI（Task #30）写入已配对 client capabilities 的入口；E1 只提供入口，不实现调用它的 UI。覆盖式写入，未配对时拒绝。 */
+  /** 写入已配对 client 的 capabilities（覆盖式，非增量）；未配对时拒绝。extension/options.html 的账号/能力授权 UI 调用它。 */
   setMailCapabilities(capabilities: readonly string[]): Promise<ThunderbirdSkillBridgeState>;
 }
 

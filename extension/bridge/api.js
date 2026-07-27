@@ -571,12 +571,14 @@ const MAIL_ROUTES = [
   // message delete（永久删除）本轮不实现，无对应 route（team-lead 范围裁决 2026-07-27）。
   { id: "attachments.list", path: `${MAIL_ROUTE_PREFIX}attachments.list`, capability: "mail.read.v1", maxRequestBodyBytes: 1024 },
   { id: "attachments.save", path: `${MAIL_ROUTE_PREFIX}attachments.save`, capability: "mail.reversible.v1", maxRequestBodyBytes: 4096 },
+  { id: "attachments.fetch", path: `${MAIL_ROUTE_PREFIX}attachments.fetch`, capability: "mail.reversible.v1", maxRequestBodyBytes: 1024 },
   { id: "drafts.create", path: `${MAIL_ROUTE_PREFIX}drafts.create`, capability: "draft.write.v1", maxRequestBodyBytes: 8192 },
   { id: "drafts.update", path: `${MAIL_ROUTE_PREFIX}drafts.update`, capability: "draft.write.v1", maxRequestBodyBytes: 8192 },
   { id: "drafts.open", path: `${MAIL_ROUTE_PREFIX}drafts.open`, capability: "draft.write.v1", maxRequestBodyBytes: 1024 },
   { id: "drafts.send.prepare", path: `${MAIL_ROUTE_PREFIX}drafts.send.prepare`, capability: "mail.send-confirmed.v1", maxRequestBodyBytes: 2048 },
   { id: "drafts.send.confirm", path: `${MAIL_ROUTE_PREFIX}drafts.send.confirm`, capability: "mail.send-confirmed.v1", maxRequestBodyBytes: 2048 },
   { id: "operations.get", path: `${MAIL_ROUTE_PREFIX}operations.get`, capability: "mail.read.v1", maxRequestBodyBytes: 1024 },
+  { id: "operations.undo", path: `${MAIL_ROUTE_PREFIX}operations.undo`, capability: "mail.reversible.v1", maxRequestBodyBytes: 1024 },
   // watch（bounded JSONL 事件流）本轮不实现，无对应 route（team-lead 范围裁决 2026-07-27）。
 ];
 
@@ -719,6 +721,9 @@ function stateView(state) {
     pairingState: state.pairingState,
     pairingEpoch: String(state.pairingEpoch),
     clientId: state.pairing?.clientId ?? null,
+    // options 页面用它渲染/预填已授予的 capability 复选框；生产环境在账号/
+    // 能力授权 UI 落地前恒为空集（confirmPairing 写入的默认值）。
+    capabilities: state.pairing?.capabilities ?? [],
     pendingIntentId: state.pending?.intentId ?? null,
     pendingCode: state.pending?.code ?? null,
     pendingClientId: state.pending?.clientId ?? null,

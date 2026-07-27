@@ -114,7 +114,12 @@ export const MAIL_ROUTES: readonly MailRouteSpec[] = [
   {
     id: "attachments.save", method: "POST", path: `${MAIL_ROUTE_PREFIX}attachments.save`, command: ["attachments", "save"],
     risk: "reversible", capability: "mail.reversible.v1", maxRequestBodyBytes: 4 * KIB, maxResponseBodyBytes: 8 * KIB,
-    summary: "保存附件到显式目标目录（no-clobber）",
+    summary: "校验目标路径（no-clobber/敏感路径/符号链接拒绝）并签发短期 attachment fetch token，不在本请求内联附件字节",
+  },
+  {
+    id: "attachments.fetch", method: "POST", path: `${MAIL_ROUTE_PREFIX}attachments.fetch`, command: ["attachments", "save"],
+    risk: "reversible", capability: "mail.reversible.v1", maxRequestBodyBytes: 1 * KIB, maxResponseBodyBytes: 512 * KIB,
+    summary: "凭 attachments.save 签发的 fetch token 分块拉取附件字节（base64，单块受限，cursor 续取），CLI 侧落盘",
   },
   {
     id: "drafts.create", method: "POST", path: `${MAIL_ROUTE_PREFIX}drafts.create`, command: ["draft", "create"],
@@ -145,6 +150,11 @@ export const MAIL_ROUTES: readonly MailRouteSpec[] = [
     id: "operations.get", method: "POST", path: `${MAIL_ROUTE_PREFIX}operations.get`, command: ["operations", "get"],
     risk: "read", capability: "mail.read.v1", maxRequestBodyBytes: 1 * KIB, maxResponseBodyBytes: 8 * KIB,
     summary: "查询 operationId 对应的异步/可撤销操作状态",
+  },
+  {
+    id: "operations.undo", method: "POST", path: `${MAIL_ROUTE_PREFIX}operations.undo`, command: ["undo"],
+    risk: "reversible", capability: "mail.reversible.v1", maxRequestBodyBytes: 1 * KIB, maxResponseBodyBytes: 8 * KIB,
+    summary: "凭可逆操作返回的一次性 undo token 撤销该操作（跨 client/过期/重放均失败）",
   },
   // watch（bounded JSONL 事件流）本轮不冻结 route；commands.ts 中对应命令
   // 保持 phase: "future"。

@@ -37,12 +37,14 @@ const MAIL_ROUTE_IDS = [
   "messages.trash",
   "attachments.list",
   "attachments.save",
+  "attachments.fetch",
   "drafts.create",
   "drafts.update",
   "drafts.open",
   "drafts.send.prepare",
   "drafts.send.confirm",
   "operations.get",
+  "operations.undo",
 ] as const;
 
 type MailRouteId = (typeof MAIL_ROUTE_IDS)[number];

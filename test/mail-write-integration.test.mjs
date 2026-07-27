@@ -218,11 +218,12 @@ function createSandbox() {
   const responded = [];
   const failed = [];
   const consoleErrors = [];
+  const consoleInfos = [];
   let operationListener;
   const browserWrite = buildWriteBrowserMock();
 
   const sandbox = {
-    console: { info() {}, warn() {}, error(...args) { consoleErrors.push(args); } },
+    console: { info(...args) { consoleInfos.push(args); }, warn() {}, error(...args) { consoleErrors.push(args); } },
     crypto: globalThis.crypto,
     btoa: globalThis.btoa,
     atob: globalThis.atob,
@@ -244,7 +245,7 @@ function createSandbox() {
     },
   };
   sandbox.globalThis = sandbox;
-  return { sandbox, responded, failed, consoleErrors, browserWrite, getOperationListener: () => operationListener, advanceClock: (ms) => { clockMs += ms; } };
+  return { sandbox, responded, failed, consoleErrors, consoleInfos, browserWrite, getOperationListener: () => operationListener, advanceClock: (ms) => { clockMs += ms; } };
 }
 
 async function loadBundleInSandbox(bundle) {
@@ -794,4 +795,94 @@ test("attachments fetch：超过 2 分钟 TTL 后过期 E_NOT_FOUND", async () =
   const expired = await call("attachments.fetch", { fetchToken: saved.result.fetchToken });
   assert.equal(expired.ok, false);
   assert.equal(expired.errorCode, "E_NOT_FOUND");
+});
+
+// ---------------------------------------------------------------------------
+// 补充验收（team-lead/Opus 第三段判据）：跨 client confirmation、仅主题
+// 变化触发摘要失效、operations get 不泄漏他人 operation、审计日志脱敏。
+// ---------------------------------------------------------------------------
+
+test("draft send：跨 client 提交 confirm 必须 E_CONFIRMATION_REQUIRED，不泄漏 confirmationId 是否存在", async () => {
+  const bundle = await getBundle();
+  const ctx = await loadBundleInSandbox(bundle);
+  const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);
+  const created = await createDraftForSend(call);
+  const prepared = await call("drafts.send.prepare", { draftRef: created.result.draftRef });
+
+  const crossClient = await call("drafts.send.confirm", {
+    draftRef: created.result.draftRef, confirmationId: prepared.result.confirmationId, draftRevision: prepared.result.revision,
+  }, "client_B", "0");
+  assert.equal(crossClient.ok, false);
+  assert.equal(crossClient.errorCode, "E_CONFIRMATION_REQUIRED");
+  assert.equal(ctx.browserWrite.sendAttempts.length, 0, "跨 client 的 confirm 绝不能触发真实发送");
+
+  // 证明上面的拒绝不是 confirmationId 本身已经失效——原 client 仍能正常兑现。
+  const legit = await call("drafts.send.confirm", {
+    draftRef: created.result.draftRef, confirmationId: prepared.result.confirmationId, draftRevision: prepared.result.revision,
+  }, "client_A", "0");
+  assert.equal(legit.ok, true, JSON.stringify(legit));
+});
+
+test("draft send：仅主题变化也会让 confirm 因摘要不符而失败", async () => {
+  const bundle = await getBundle();
+  const ctx = await loadBundleInSandbox(bundle);
+  const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);
+  const created = await createDraftForSend(call);
+  const prepared = await call("drafts.send.prepare", { draftRef: created.result.draftRef });
+
+  ctx.browserWrite.setComposeDetailsDirectly(created.result.composeTabId, { subject: "changed subject only" });
+  const confirmed = await call("drafts.send.confirm", {
+    draftRef: created.result.draftRef, confirmationId: prepared.result.confirmationId, draftRevision: prepared.result.revision,
+  });
+  assert.equal(confirmed.ok, false);
+  assert.equal(confirmed.errorCode, "E_CONFIRMATION_REQUIRED");
+  assert.equal(ctx.browserWrite.sendAttempts.length, 0);
+});
+
+test("operations get：跨 client 查询他人 operation 必须 E_NOT_FOUND，不泄漏存在性", async () => {
+  const bundle = await getBundle();
+  const ctx = await loadBundleInSandbox(bundle);
+  const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);
+  ctx.browserWrite.addMessage({});
+  const searchRes = await call("messages.search", {});
+  const msgRef = searchRes.result.messages[0].messageRef;
+  const marked = await call("messages.mark", { messageRefs: [msgRef], read: true });
+
+  const crossClient = await call("operations.get", { operationId: marked.result.operationId }, "client_B", "0");
+  assert.equal(crossClient.ok, false);
+  assert.equal(crossClient.errorCode, "E_NOT_FOUND");
+
+  const crossEpoch = await call("operations.get", { operationId: marked.result.operationId }, "client_A", "1");
+  assert.equal(crossEpoch.ok, false);
+  assert.equal(crossEpoch.errorCode, "E_NOT_FOUND");
+
+  const legit = await call("operations.get", { operationId: marked.result.operationId }, "client_A", "0");
+  assert.equal(legit.ok, true, JSON.stringify(legit));
+});
+
+test("audit 日志：mark 成功事件不含 token/正文/完整邮箱地址，client 只以 keyed hash 出现", async () => {
+  const bundle = await getBundle();
+  const ctx = await loadBundleInSandbox(bundle);
+  const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);
+  const secretClientId = "client_super_secret_identity_001";
+  ctx.browserWrite.addMessage({});
+  // msgRef 必须在 secretClientId 名下签发（ref 绑定 clientId），否则后面
+  // mark 会因为跨 client 解析 ref 而先 E_NOT_FOUND，测不到审计日志内容。
+  const searchRes = await call("messages.search", {}, secretClientId, "0");
+  const msgRef = searchRes.result.messages[0].messageRef;
+
+  ctx.consoleInfos.length = 0;
+  const marked = await call("messages.mark", { messageRefs: [msgRef], read: true }, secretClientId, "0");
+  assert.equal(marked.ok, true, JSON.stringify(marked));
+  const undoToken = marked.result.undo.token;
+
+  const auditLines = ctx.consoleInfos.filter((args) => String(args[0]).includes("[audit]")).map((args) => args.map(String).join(" "));
+  assert.ok(auditLines.length > 0, "mark 成功必须产生至少一条审计日志");
+  for (const line of auditLines) {
+    assert.doesNotMatch(line, new RegExp(secretClientId), "审计日志不得包含原始 clientId 明文");
+    assert.doesNotMatch(line, /read|flagged|junk|tags/i, "审计日志不得包含具体字段级正文/变更内容");
+    assert.doesNotMatch(line, new RegExp(undoToken), "审计日志不得包含 undo token 明文");
+    assert.doesNotMatch(line, /@example\.com/, "审计日志不得包含完整邮箱地址");
+  }
+  assert.ok(auditLines.some((line) => /client#[0-9a-f]{8}/.test(line)), "client 应以固定格式的 keyed hash 出现，而不是原始 id 或完全缺席");
 });

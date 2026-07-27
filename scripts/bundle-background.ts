@@ -40,25 +40,12 @@ const MODULES: ReadonlyArray<{ readonly id: string; readonly relPath: string }> 
   { id: "refs", relPath: "refs.js" },
   { id: "schema", relPath: "schema.js" },
   { id: "mail_state", relPath: "mail/state.js" },
-  // 下面两个（policy/audit，Task #30/mail-write 新增）只依赖 mail_state，
-  // 必须排在它之后、排在会 import 它们的 mail/mutate.js 等文件之前。
-  { id: "policy", relPath: "policy.js" },
-  { id: "audit", relPath: "audit.js" },
   { id: "mail_sanitize", relPath: "mail/sanitize.js" },
   { id: "mail_accounts", relPath: "mail/accounts.js" },
   { id: "mail_folders", relPath: "mail/folders.js" },
   { id: "mail_attachments", relPath: "mail/attachments.js" },
   { id: "mail_search", relPath: "mail/search.js" },
   { id: "mail_messages", relPath: "mail/messages.js" },
-  // 下面六个（Task #30/mail-write：可逆/草稿/外发域）新增。mail_operations
-  // 必须排在 mail_mutate/mail_undo/mail_send 之前（三者都 import 它的
-  // recordOperation/markOperationUndone/peekOperationRecord）。
-  { id: "mail_operations", relPath: "mail/operations.js" },
-  { id: "mail_mutate", relPath: "mail/mutate.js" },
-  { id: "mail_undo", relPath: "mail/undo.js" },
-  { id: "mail_drafts", relPath: "mail/drafts.js" },
-  { id: "mail_send", relPath: "mail/send.js" },
-  { id: "mail_attachments_write", relPath: "mail/attachments-write.js" },
   { id: "mail_index", relPath: "mail/index.js" },
 ] as const;
 

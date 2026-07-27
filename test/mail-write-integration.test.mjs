@@ -315,16 +315,11 @@ test("message mark：批量超过 20 封 E_POLICY_DENIED，不执行任何一条
 
   const result = await call("messages.mark", { messageRefs: refs.slice(0, 21), read: true });
   assert.equal(result.ok, false);
-  // 发现记录（不在本任务改动范围内，已同步 team-lead 另行确认）：
-  // mutate.ts 的 JSON schema 把 messageRefs 的 maxItems 设成了与
-  // policy.ts BATCH_THRESHOLDS.mark 完全相同的 20，这意味着"超过阈值"
-  // 这个场景永远先被 schema 校验拦成 E_VALIDATION，assertBatchLimit() 里
-  // `count > limit` 那个分支实际上是无法触达的死代码——真正应该出现的
-  // E_POLICY_DENIED 语义（docs/03 退出码表里"策略拒绝"与"参数错误"是两种
-  // 不同的调用方处理方式）目前不会发生。这里先如实断言当前行为
-  // （E_VALIDATION），批量超限时不执行任何一条 update 这个安全不变量仍然
-  // 成立，只是命中的层级和错误码与设计意图不同。
-  assert.equal(result.errorCode, "E_VALIDATION");
+  // Task #42 收敛：schema 层的 DoS 防护上限（100）与 policy.ts 的语义阈值
+  // （mark=20）已分离，超过 20 但仍在 schema 上限内必须精确命中
+  // assertBatchLimit() 返回 E_POLICY_DENIED，不再被 schema 抢先拦成
+  // E_VALIDATION。
+  assert.equal(result.errorCode, "E_POLICY_DENIED");
   assert.equal(ctx.browserWrite.updateCalls.length, 0, "批量超限必须不执行任何一条 update");
 });
 
@@ -365,10 +360,10 @@ test("message move：成功路径移动到目标文件夹并签发 undo；批量
   const manyRefs = search2.result.messages.map((m) => m.messageRef).slice(0, 11);
   const overLimit = await call("messages.move", { messageRefs: manyRefs, targetFolderRef: archiveRef });
   assert.equal(overLimit.ok, false);
-  // 同 message mark 用例里记录的发现：schema maxItems（10）与
-  // policy.ts BATCH_THRESHOLDS.move（10）相同，超限先被 schema 拦成
-  // E_VALIDATION，assertBatchLimit 的 E_POLICY_DENIED 分支不可达。
-  assert.equal(overLimit.errorCode, "E_VALIDATION");
+  // Task #42 收敛：同 mark，超过 policy 阈值（move=10）但仍在 schema 的
+  // DoS 上限（100）内，必须精确命中 E_POLICY_DENIED。
+  assert.equal(overLimit.errorCode, "E_POLICY_DENIED");
+  assert.equal(ctx.browserWrite.moveCalls.length, 1, "批量超限必须不执行任何一条 move（此前那次成功 move 除外）");
 });
 
 test("message trash：移入 specialUse=trash 文件夹（不调用 delete），批量超过 5 封 E_POLICY_DENIED", async () => {
@@ -388,10 +383,10 @@ test("message trash：移入 specialUse=trash 文件夹（不调用 delete），
   const manyRefs = search2.result.messages.map((m) => m.messageRef).slice(0, 6);
   const overLimit = await call("messages.trash", { messageRefs: manyRefs });
   assert.equal(overLimit.ok, false);
-  // 同上：schema maxItems（5）与 policy.ts BATCH_THRESHOLDS.trash（5）相同，
-  // 超限先被 schema 拦成 E_VALIDATION，assertBatchLimit 的 E_POLICY_DENIED
-  // 分支不可达。
-  assert.equal(overLimit.errorCode, "E_VALIDATION");
+  // Task #42 收敛：同上，超过 policy 阈值（trash=5）但仍在 schema 的
+  // DoS 上限（100）内，必须精确命中 E_POLICY_DENIED。
+  assert.equal(overLimit.errorCode, "E_POLICY_DENIED");
+  assert.equal(ctx.browserWrite.moveCalls.length, 1, "批量超限必须不执行任何一条 move（此前那次成功 trash 除外）");
 });
 
 test("写请求限流：同一 client 短时间内超过 60 次写请求 E_POLICY_DENIED", async () => {
@@ -668,6 +663,16 @@ test("draft send：sendMessage 真实失败时返回 E_INTERNAL 且 operations g
   });
   assert.equal(confirmed.ok, false);
   assert.equal(confirmed.errorCode, "E_INTERNAL");
+
+  // 标题承诺了"operations get 显示 failed"，这里必须真的调用它验证，而不是
+  // 只停在 confirm 本身的错误码上。operationId 从错误消息里按固定前缀解析
+  // （send.ts 明确嵌入，见其头部 Task #42 收敛说明）。
+  const operationIdMatch = /operationId=(op_[A-Za-z0-9_-]+)/.exec(confirmed.errorMessage);
+  assert.ok(operationIdMatch, `错误消息应包含可解析的 operationId：${confirmed.errorMessage}`);
+  const opsRes = await call("operations.get", { operationId: operationIdMatch[1] });
+  assert.equal(opsRes.ok, true, JSON.stringify(opsRes));
+  assert.equal(opsRes.result.state, "failed");
+  assert.equal(opsRes.result.undoable, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -885,4 +890,30 @@ test("audit 日志：mark 成功事件不含 token/正文/完整邮箱地址，c
     assert.doesNotMatch(line, /@example\.com/, "审计日志不得包含完整邮箱地址");
   }
   assert.ok(auditLines.some((line) => /client#[0-9a-f]{8}/.test(line)), "client 应以固定格式的 keyed hash 出现，而不是原始 id 或完全缺席");
+});
+
+test("audit 日志：draft send 全流程（含真实主题/收件人）不泄漏完整主题或收件人地址", async () => {
+  const bundle = await getBundle();
+  const ctx = await loadBundleInSandbox(bundle);
+  const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);
+  const secretSubject = "机密并购谈判进度速报-请勿外传";
+  const secretRecipient = "very-secret-target@example.com";
+  const identityRef = await setupIdentity(call);
+
+  ctx.consoleInfos.length = 0;
+  const created = await call("drafts.create", { identityRef, to: [secretRecipient], subject: secretSubject, body: "正文机密内容" });
+  const prepared = await call("drafts.send.prepare", { draftRef: created.result.draftRef });
+  const confirmed = await call("drafts.send.confirm", {
+    draftRef: created.result.draftRef, confirmationId: prepared.result.confirmationId, draftRevision: prepared.result.revision,
+  });
+  assert.equal(confirmed.ok, true, JSON.stringify(confirmed));
+
+  const auditLines = ctx.consoleInfos.filter((args) => String(args[0]).includes("[audit]")).map((args) => args.map(String).join(" "));
+  assert.ok(auditLines.length >= 3, "create/prepare/confirm 三步都应各自产生审计日志");
+  for (const line of auditLines) {
+    assert.doesNotMatch(line, new RegExp(secretSubject), "审计日志不得包含完整主题明文");
+    assert.doesNotMatch(line, new RegExp(secretRecipient), "审计日志不得包含完整收件人地址明文");
+    assert.doesNotMatch(line, /正文机密内容/, "审计日志不得包含正文明文");
+    assert.doesNotMatch(line, new RegExp(prepared.result.confirmationId), "审计日志不得包含 confirmationId 明文");
+  }
 });

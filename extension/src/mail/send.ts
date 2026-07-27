@@ -169,7 +169,12 @@ export async function draftsSendConfirm(body: unknown, context: MailAdapterConte
   } catch (error) {
     recordOperation(operationId, "drafts.send", [parsed.draftRef], context, "failed");
     recordAudit({ routeId: "drafts.send.confirm", capability: context.capability, clientId: context.clientId, outcome: "error", detail: "send-failed" });
-    throw new MailAdapterError("E_INTERNAL", error instanceof Error ? "外发失败：请通过 operations get 查询最新状态，不要自动重试" : "外发失败");
+    // Task #42 收敛：错误消息必须真的带上 operationId，否则"请通过 operations
+    // get 查询最新状态"这句提示没有任何东西可查——MailAdapterError 目前只有
+    // code/message 两个字段（没有结构化 details 透传通道，那需要改
+    // background.ts/api.js 的 failOperation 签名，不在本任务改动范围内），
+    // 所以把 operationId 直接嵌进 message 文本，调用方可用固定前缀解析。
+    throw new MailAdapterError("E_INTERNAL", `外发失败（operationId=${operationId}）：请通过 operations get 查询最新状态，不要自动重试`);
   }
 
   recordOperation(operationId, "drafts.send", [parsed.draftRef], context, "sent");

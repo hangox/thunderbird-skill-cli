@@ -20,6 +20,20 @@ import { MailAdapterError, issueRef, mailRefStore, resolveRef, REF_TTL_MS, type 
 interface MessageRefPayload { messageNativeId: number }
 interface FolderRefPayload { accountNativeId: string; folderNativeId: unknown }
 
+/**
+ * schema 层的 messageRefs 数组上限，与 policy.ts 的 BATCH_THRESHOLDS
+ * （mark 20 / move 10 / trash 5）刻意保持不同数值、不同职责（Task #42
+ * 收敛，此前两者被设成相同值，导致"超过阈值"永远先被 schema 拦成
+ * E_VALIDATION，policy.assertBatchLimit() 的 E_POLICY_DENIED 分支实际
+ * 不可达——见 test/mail-write-integration.test.mjs 里记录的这处发现）。
+ * 现在职责明确分层：schema 只挡住"body 里塞了几千个 ref 造成解析/内存
+ * 开销"这类粗粒度 DoS，不表达任何业务语义；policy 的 20/10/5 才是唯一
+ * 决定"这批操作是否需要更谨慎处理"的语义阈值，超过它精确返回
+ * E_POLICY_DENIED（docs/03 退出码表的"策略拒绝"），不会被 schema 抢先
+ * 拦截成语义不同的 E_VALIDATION（"参数错误"）。
+ */
+const SCHEMA_BATCH_DOS_CAP = 100;
+
 /** undo.ts 唯一权威的 payload 形状；kind 决定还原动作，items 是逐条快照。 */
 export interface UndoPayload {
   readonly kind: "mark" | "move" | "trash";
@@ -67,7 +81,7 @@ function issueUndoAndRecord(kind: UndoPayload["kind"], operationKind: "messages.
 const MESSAGES_MARK_SCHEMA: JsonSchema = {
   type: "object",
   properties: {
-    messageRefs: boundedArraySchema(opaqueRefSchema("msg"), 20),
+    messageRefs: boundedArraySchema(opaqueRefSchema("msg"), SCHEMA_BATCH_DOS_CAP),
     read: { type: "boolean" },
     flagged: { type: "boolean" },
     junk: { type: "boolean" },
@@ -121,7 +135,7 @@ export async function messagesMark(body: unknown, context: MailAdapterContext): 
 const MESSAGES_MOVE_SCHEMA: JsonSchema = {
   type: "object",
   properties: {
-    messageRefs: boundedArraySchema(opaqueRefSchema("msg"), 10),
+    messageRefs: boundedArraySchema(opaqueRefSchema("msg"), SCHEMA_BATCH_DOS_CAP),
     targetFolderRef: opaqueRefSchema("folder"),
   },
   required: ["messageRefs", "targetFolderRef"],
@@ -163,7 +177,7 @@ export async function messagesMove(body: unknown, context: MailAdapterContext): 
 
 const MESSAGES_TRASH_SCHEMA: JsonSchema = {
   type: "object",
-  properties: { messageRefs: boundedArraySchema(opaqueRefSchema("msg"), 5) },
+  properties: { messageRefs: boundedArraySchema(opaqueRefSchema("msg"), SCHEMA_BATCH_DOS_CAP) },
   required: ["messageRefs"],
 };
 

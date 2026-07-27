@@ -649,8 +649,7 @@ const MAIL_ROUTES = [
 ];
 
 // 与 src/contracts/routes.ts 的 MAIL_CAPABILITIES 逐条对应；setMailCapabilities
-// 用它拒绝任何未知字符串，不接受 MAIL_ROUTES 之外声明过的死能力（如
-// calendar.read.v1）。
+// 用它拒绝任何未知字符串或没有对应 route 的死能力标识。
 const KNOWN_MAIL_CAPABILITIES = new Set(["mail.read.v1", "mail.reversible.v1", "draft.write.v1", "mail.send-confirmed.v1"]);
 
 function findMailRoute(method, path) {

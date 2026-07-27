@@ -16,8 +16,7 @@ export type MailRouteMethod = "POST";
 
 // 范围裁决（team-lead，2026-07-27）：v0.3.0 不实现永久删除、长连接/轮询式
 // watch、calendar。本文件因此不冻结这三类能力的 route，MailCapability 也
-// 不包含没有对应 route 的死能力标识（含曾计划中的
-// mail.delete-confirmed.v1 / mail.watch.v1 / calendar.read.v1）。
+// 不包含任何没有对应 route 的死能力标识。
 export type MailCapability =
   | "mail.read.v1"
   | "mail.reversible.v1"

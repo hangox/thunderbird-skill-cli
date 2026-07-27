@@ -11,8 +11,7 @@ const EMPTY_BODY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca4959
 // Capability 字面量集合与 src/contracts/routes.ts 的 MailCapability 是同一份契约的
 // 两处镜像（extension/ 与 src/ 是两个独立的 tsconfig rootDir，不能跨界 import）。
 // 新增/删除能力标识时两处必须同步修改。v0.3.0 范围裁决排除永久删除、watch、
-// calendar，因此不含 mail.delete-confirmed.v1 / mail.watch.v1 / calendar.read.v1
-// 这类没有对应 route 的死能力标识。
+// calendar 三类能力，这里不声明任何没有对应 route 的能力标识。
 export type Capability =
   | "mail.read.v1"
   | "mail.reversible.v1"

@@ -45,7 +45,7 @@ function createFixture() {
   elements["#capabilities-form"] = form;
 
   const document = { querySelector: (selector) => elements[selector] ?? null };
-  const calls = { confirmPairing: [], revokePairing: [], setMailCapabilities: [] };
+  const calls = { confirmPairing: [], revokePairing: [], setMailCapabilities: [], permissionsRequest: [], permissionsRemove: [] };
   let getStateImpl = async () => baseState();
 
   function baseState(overrides = {}) {
@@ -57,6 +57,11 @@ function createFixture() {
     };
   }
 
+  // Task #44：compose.send 是可选权限，request() 的返回值由测试用例通过
+  // setPermissionRequestResult 控制（默认同意），模拟浏览器原生弹窗的用户
+  // 选择。request/remove 各自的调用参数都记录下来，供断言"确实只请求/收回
+  // 了 compose.send 这一个权限字符串，且只在勾选/取消勾选外发能力时才调用"。
+  let permissionRequestResult = true;
   const browser = {
     thunderbirdSkillBridge: {
       getState: async () => getStateImpl(),
@@ -64,11 +69,17 @@ function createFixture() {
       revokePairing: async () => { calls.revokePairing.push(true); return baseState({ pairingState: "revoked" }); },
       setMailCapabilities: async (capabilities) => { calls.setMailCapabilities.push(capabilities); return baseState({ pairingState: "paired", clientId: "client_demo", capabilities }); },
     },
+    permissions: {
+      request: async (request) => { calls.permissionsRequest.push(request); return permissionRequestResult; },
+      remove: async (request) => { calls.permissionsRemove.push(request); return true; },
+      contains: async () => permissionRequestResult,
+    },
   };
 
   return {
     elements, form, checkboxes, document, browser, calls,
     setGetState(impl) { getStateImpl = impl; },
+    setPermissionRequestResult(value) { permissionRequestResult = value; },
     baseState,
     submitCapabilitiesForm: async () => { await formSubmitHandler?.({ preventDefault() {} }); },
   };
@@ -135,6 +146,52 @@ test("提交表单：全部取消勾选时覆盖式清空，状态文案明确�
   assert.match(fixture.elements["#capabilities-status"].textContent, /未授予任何能力/);
 });
 
+test("Task #44：勾选外发确认能力并提交时，先请求 compose.send 浏览器权限；同意后正常写入 capabilities", async () => {
+  const fixture = createFixture();
+  fixture.setGetState(async () => fixture.baseState({ pairingState: "paired", clientId: "client_demo", capabilities: [] }));
+  await loadOptions(fixture);
+  fixture.setPermissionRequestResult(true);
+
+  fixture.checkboxes["mail.send-confirmed.v1"].checked = true;
+  await fixture.submitCapabilitiesForm();
+
+  assert.equal(fixture.calls.permissionsRequest.length, 1);
+  assert.deepEqual(fixture.calls.permissionsRequest[0], { permissions: ["compose.send"] });
+  assert.equal(fixture.calls.permissionsRemove.length, 0, "同意授权时不应该调用 remove");
+  assert.deepEqual(fixture.calls.setMailCapabilities[0], ["mail.send-confirmed.v1"]);
+  assert.match(fixture.elements["#capabilities-status"].textContent, /已保存，当前授予 1 项能力/);
+});
+
+test("Task #44：浏览器拒绝 compose.send 权限请求时，外发确认能力不写入 capabilities、复选框回退为未勾选，其余勾选项仍正常保存", async () => {
+  const fixture = createFixture();
+  fixture.setGetState(async () => fixture.baseState({ pairingState: "paired", clientId: "client_demo", capabilities: [] }));
+  await loadOptions(fixture);
+  fixture.setPermissionRequestResult(false);
+
+  fixture.checkboxes["mail.read.v1"].checked = true;
+  fixture.checkboxes["mail.send-confirmed.v1"].checked = true;
+  await fixture.submitCapabilitiesForm();
+
+  assert.equal(fixture.calls.permissionsRequest.length, 1);
+  assert.deepEqual(fixture.calls.setMailCapabilities[0], ["mail.read.v1"], "被拒绝的外发能力不应该出现在写入 setMailCapabilities 的集合里");
+  assert.equal(fixture.checkboxes["mail.send-confirmed.v1"].checked, false, "被拒绝后复选框必须回退为未勾选，不能停留在“看起来选中”的状态");
+  assert.match(fixture.elements["#capabilities-status"].textContent, /浏览器拒绝了 compose\.send 权限请求/);
+});
+
+test("Task #44：取消勾选外发确认能力并提交时，调用 permissions.remove 收回 compose.send，不调用 request", async () => {
+  const fixture = createFixture();
+  fixture.setGetState(async () => fixture.baseState({ pairingState: "paired", clientId: "client_demo", capabilities: ["mail.send-confirmed.v1"] }));
+  await loadOptions(fixture);
+
+  fixture.checkboxes["mail.send-confirmed.v1"].checked = false;
+  await fixture.submitCapabilitiesForm();
+
+  assert.equal(fixture.calls.permissionsRequest.length, 0);
+  assert.equal(fixture.calls.permissionsRemove.length, 1);
+  assert.deepEqual(fixture.calls.permissionsRemove[0], { permissions: ["compose.send"] });
+  assert.deepEqual(fixture.calls.setMailCapabilities[0], []);
+});
+
 test("提交表单失败时：展示错误信息并回退到真实的最新状态，不假设已生效", async () => {
   const fixture = createFixture();
   fixture.setGetState(async () => fixture.baseState({ pairingState: "paired", clientId: "client_demo", capabilities: ["mail.read.v1"] }));
@@ -161,11 +218,13 @@ test("确认配对：intentId/code/clientId 三者必须与当前实际状态完
   assert.deepEqual(fixture.calls.confirmPairing[0], { intentId: "intent_abc", code: "123456" });
 });
 
-test("撤销配对按钮仅在 paired 状态下可用", async () => {
+test("撤销配对按钮仅在 paired 状态下可用；撤销时一并收回 compose.send 可选权限，不留悬空授权", async () => {
   const fixture = createFixture();
-  fixture.setGetState(async () => fixture.baseState({ pairingState: "paired", clientId: "client_demo" }));
+  fixture.setGetState(async () => fixture.baseState({ pairingState: "paired", clientId: "client_demo", capabilities: ["mail.send-confirmed.v1"] }));
   await loadOptions(fixture);
   assert.equal(fixture.elements["#revoke-pairing"].disabled, false);
   await fixture.elements["#revoke-pairing"]._listeners.click({});
   assert.equal(fixture.calls.revokePairing.length, 1);
+  assert.equal(fixture.calls.permissionsRemove.length, 1);
+  assert.deepEqual(fixture.calls.permissionsRemove[0], { permissions: ["compose.send"] });
 });

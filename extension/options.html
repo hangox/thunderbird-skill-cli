@@ -68,7 +68,7 @@
             <input type="checkbox" id="capability-mail-send" value="mail.send-confirmed.v1" disabled>
             <div>
               <label class="label" for="capability-mail-send">外发确认（默认关闭，请单独评估后再勾选）</label>
-              <div class="description">对已创建草稿执行 prepare/confirm 两阶段确认后发送；这是唯一能让邮件真正离开本机的能力，与上面三项分开授予</div>
+              <div class="description">对已创建草稿执行 prepare/confirm 两阶段确认后发送；这是唯一能让邮件真正离开本机的能力，与上面三项分开授予。勾选并保存后浏览器会额外弹出一次原生权限确认（<code>compose.send</code>）——这是一个独立于本页面的浏览器层门禁，默认不持有，未同意该弹窗时外发在物理上不可用；取消勾选并保存会同时收回该权限</div>
             </div>
           </div>
         </fieldset>

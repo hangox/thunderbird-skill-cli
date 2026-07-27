@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Thunderbird Skill Bridge",
-  "version": "0.3.0",
-  "description": "为本机 thunderbird CLI 提供回环服务、配对与只读/可逆/草稿邮件能力；不申请永久删除或日历权限，外发权限（compose.send）留待外发专项评审后的集成阶段单独加入",
+  "version": "0.4.0",
+  "description": "为本机 thunderbird CLI 提供回环服务、配对与只读/可逆/草稿-外发邮件能力；不申请永久删除或日历权限。真实外发（compose.send）是可选权限，默认未授予、物理无法发送；用户须在扩展 options 页面显式勾选外发确认能力，经浏览器原生权限提示同意后才会真正解锁",
   "browser_specific_settings": {
     "gecko": {
       "id": "thunderbird-skill-bridge@local",
@@ -33,6 +33,9 @@
     "messagesMove",
     "compose",
     "compose.save"
+  ],
+  "optional_permissions": [
+    "compose.send"
   ],
   "host_permissions": [],
   "web_accessible_resources": []

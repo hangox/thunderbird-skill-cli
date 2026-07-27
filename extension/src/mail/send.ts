@@ -14,11 +14,19 @@
 //   注释），因此天然满足"不自动重试"：CLI 侧超时后即使用户手动重跑同一条
 //   confirm 命令，第二次调用只会拿到 E_CONFIRMATION_REQUIRED（token 已被
 //   消费），绝不会造成第二次真实发送。
-// - `compose.send` 权限本轮**未**在 manifest.json 申请（见 mail-api.d.ts
-//   顶部说明与 manifest.json 自身注释），因此下面对 `sendMessage()` 的调用
-//   在真实 Thunderbird 环境中会因权限缺失而失败——这是"禁止真实发送"的
-//   物理保证，不只是本文件的代码逻辑；一旦外发专项评审通过、集成阶段加入该
-//   权限，这里不需要任何改动即可开始真正生效。
+// - `compose.send`（Task #44，0.4.0）是 manifest.json 的可选权限
+//   （`optional_permissions`，不在常驻 `permissions` 里），默认未授予：
+//   用户必须在扩展 options 页面显式勾选"外发确认"能力，经浏览器原生
+//   `permissions.request()` 提示同意后才会真正持有。`draftsSendConfirm`
+//   在调用 `sendMessage()` 之前，额外用 `browser.permissions.contains()`
+//   独立确认这个浏览器层权限确实存在——不信任"capability 系统（下面的
+//   `context.capability` 门禁，发生在更早的 route dispatch 阶段）已经放行"
+//   就等于"浏览器权限也一定还在"：这两套状态可能互相漂移（例如用户绕过
+//   options 页面、直接在 Thunderbird 自身插件管理页面撤销了这个可选权限），
+//   缺权限时精确返回 `E_POLICY_DENIED`（不是 `E_INTERNAL`——那个错误码
+//   语义上是"执行中出了意外"，而这里是"从一开始就不该执行"，两者对调用方
+//   的含义不同：前者可能意味着"重试也没用，需要用户重新授权"，后者容易被
+//   误当成瞬时故障）。
 import { recordAudit } from "../audit.js";
 import { stableStringify } from "../policy.js";
 import type { JsonSchema } from "../schema.js";
@@ -26,6 +34,9 @@ import { ISO_TIMESTAMP_SCHEMA, validate } from "../schema.js";
 import { stripInvisibleAndBidi } from "./sanitize.js";
 import { recordOperation } from "./operations.js";
 import { MailAdapterError, issueRef, mailRefStore, resolveRef, REF_TTL_MS, type MailAdapterContext } from "./state.js";
+
+/** 与 extension/manifest.json 的 `optional_permissions` 条目、extension/src/options.ts 的同名常量是同一份契约的镜像。 */
+const COMPOSE_SEND_PERMISSION = "compose.send";
 
 interface DraftRefPayload { messageNativeId?: number; composeTabId?: number }
 
@@ -136,6 +147,16 @@ export async function draftsSendConfirm(body: unknown, context: MailAdapterConte
   const result = validate(SEND_CONFIRM_SCHEMA, body);
   if (!result.ok) throw new MailAdapterError("E_VALIDATION", `draft send confirm 请求体不合法：${result.errors.map((e) => `${e.path} ${e.message}`).join("; ")}`);
   const parsed = body as { draftRef: string; confirmationId: string; draftRevision: string; confirmedAt?: string };
+
+  // Task #44：浏览器层权限门禁放在最前面，且刻意在消费 confirmationId 之前
+  // 检查——缺权限时这条一次性 confirmationId 不应该被白白烧掉，用户在
+  // options 页面补授权后应该能直接重试同一个 confirmationId，不必重新跑
+  // 一遍 --prepare。这道检查独立于（并且晚于）route dispatch 阶段已经做过
+  // 的 mail.send-confirmed.v1 capability 门禁——两者互不信任对方已经生效。
+  if (!(await browser.permissions.contains({ permissions: [COMPOSE_SEND_PERMISSION] }))) {
+    recordAudit({ routeId: "drafts.send.confirm", capability: context.capability, clientId: context.clientId, outcome: "denied", reason: "send-permission-missing" });
+    throw new MailAdapterError("E_POLICY_DENIED", "浏览器未授予 compose.send 权限，外发确认能力当前物理不可用；请在扩展 options 页面显式启用外发确认能力");
+  }
 
   const nowMs = Date.now();
   const payload = mailRefStore.resolve(parsed.confirmationId, "confirm", { clientId: context.clientId, pairingEpoch: context.pairingEpoch, nowMs }) as ConfirmPayload | undefined;

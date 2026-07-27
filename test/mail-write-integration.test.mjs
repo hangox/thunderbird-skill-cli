@@ -92,6 +92,12 @@ function buildWriteBrowserMock() {
   const savedMessagesByTab = new Map(); // tabId -> last saved native message id
   const sendAttempts = []; // { tabId }
   let sendShouldFail = false;
+  // Task #44：默认已授予 compose.send（模拟"用户已在 options 页面完成授权"
+  // 的常态），让既有全部 send confirm 测试不必逐个显式授予；专门测试权限
+  // 门禁的用例用 setSendPermissionGranted(false) 显式撤销。
+  let sendPermissionGranted = true;
+  const permissionsRequestCalls = [];
+  const permissionsRemoveCalls = [];
 
   const mock = {
     accounts: {
@@ -180,6 +186,20 @@ function buildWriteBrowserMock() {
         return { id: tabId };
       },
     },
+    // Task #44：真实 browser.permissions API 的最小可控 mock——只关心
+    // "compose.send 这一个字符串是否在当前授予集合里"，request()/remove()
+    // 直接切换同一个布尔状态并各自记一笔调用供测试断言触发次数/参数。
+    permissions: {
+      contains: async ({ permissions: requested }) => Boolean(sendPermissionGranted) && (requested ?? []).every((p) => p === "compose.send"),
+      request: async ({ permissions: requested }) => {
+        permissionsRequestCalls.push([...(requested ?? [])]);
+        return sendPermissionGranted;
+      },
+      remove: async ({ permissions: requested }) => {
+        permissionsRemoveCalls.push([...(requested ?? [])]);
+        return true;
+      },
+    },
   };
 
   return {
@@ -195,6 +215,8 @@ function buildWriteBrowserMock() {
     updateCalls, moveCalls, sendAttempts,
     setSendShouldFail: (value) => { sendShouldFail = value; },
     tabSent: (tabId) => Boolean(composeTabs.get(tabId)?.sent),
+    setSendPermissionGranted: (value) => { sendPermissionGranted = value; },
+    permissionsRequestCalls, permissionsRemoveCalls,
   };
 }
 
@@ -684,6 +706,81 @@ test("draft send：sendMessage 真实失败时返回 E_INTERNAL 且 operations g
   assert.equal(opsRes.ok, true, JSON.stringify(opsRes));
   assert.equal(opsRes.result.state, "failed");
   assert.equal(opsRes.result.undoable, false);
+});
+
+// ---------------------------------------------------------------------------
+// Task #44：compose.send 可选权限门禁——独立于（且晚于）route dispatch 阶段
+// 已经做过的 mail.send-confirmed.v1 capability 检查。这里的 sandbox
+// browser.permissions mock 默认已授予（见 buildWriteBrowserMock 顶部说明），
+// 下面几条测试专门覆盖"未授予/被撤销"的 fail-closed 路径。
+// ---------------------------------------------------------------------------
+
+test("draft send：缺少 compose.send 浏览器权限时 confirm 精确返回 E_POLICY_DENIED，不触发真实 sendMessage，也不消费 confirmationId", async () => {
+  const bundle = await getBundle();
+  const ctx = await loadBundleInSandbox(bundle);
+  const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);
+  const created = await createDraftForSend(call);
+  const prepared = await call("drafts.send.prepare", { draftRef: created.result.draftRef });
+  ctx.browserWrite.setSendPermissionGranted(false);
+
+  const denied = await call("drafts.send.confirm", {
+    draftRef: created.result.draftRef, confirmationId: prepared.result.confirmationId, draftRevision: prepared.result.revision,
+  });
+  assert.equal(denied.ok, false);
+  assert.equal(denied.errorCode, "E_POLICY_DENIED");
+  assert.equal(ctx.browserWrite.sendAttempts.length, 0, "权限门禁应在调用真实 sendMessage 之前拦截，不应该有任何发送尝试");
+
+  // confirmationId 不应该被消费：补授权后同一个 confirmationId 仍能正常兑现，
+  // 用户不必因为忘记先勾选外发能力就被迫重新走一遍 --prepare。
+  ctx.browserWrite.setSendPermissionGranted(true);
+  const confirmed = await call("drafts.send.confirm", {
+    draftRef: created.result.draftRef, confirmationId: prepared.result.confirmationId, draftRevision: prepared.result.revision,
+  });
+  assert.equal(confirmed.ok, true, JSON.stringify(confirmed));
+  assert.equal(ctx.browserWrite.sendAttempts.length, 1);
+});
+
+test("draft send：capability 门禁与浏览器权限门禁互不信任——即便调用方持有 mail.send-confirmed.v1 capability，运行期缺 compose.send 权限仍然 fail-closed", async () => {
+  // makeCaller 传给 handler 的 capability 字符串本来就固定是
+  // "mail.send-confirmed.v1"（drafts.send 前缀路由），模拟"route dispatch
+  // 阶段的 capability 检查已经放行"这个前提；这条测试验证的是即便如此，
+  // handler 内部仍然独立再查一次浏览器权限，不会因为 capability 已经通过
+  // 就跳过它。
+  const bundle = await getBundle();
+  const ctx = await loadBundleInSandbox(bundle);
+  const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);
+  const created = await createDraftForSend(call);
+  const prepared = await call("drafts.send.prepare", { draftRef: created.result.draftRef });
+  ctx.browserWrite.setSendPermissionGranted(false);
+
+  ctx.consoleInfos.length = 0;
+  ctx.consoleErrors.length = 0;
+  const denied = await call("drafts.send.confirm", {
+    draftRef: created.result.draftRef, confirmationId: prepared.result.confirmationId, draftRevision: prepared.result.revision,
+  });
+  assert.equal(denied.errorCode, "E_POLICY_DENIED");
+
+  const auditLines = [...ctx.consoleInfos, ...ctx.consoleErrors].filter((args) => String(args[0]).includes("[audit]")).map((args) => JSON.parse(args[1]));
+  const denyLine = auditLines.find((l) => l.route === "drafts.send.confirm" && l.outcome === "denied" && l.reason === "send-permission-missing");
+  assert.ok(denyLine, `应产生 reason=send-permission-missing 的审计事件：${JSON.stringify(auditLines)}`);
+});
+
+test("draft send：options 页面撤销授权后（permissions.remove），即使之前已经 prepare 过，confirm 仍然 fail-closed", async () => {
+  const bundle = await getBundle();
+  const ctx = await loadBundleInSandbox(bundle);
+  const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);
+  const created = await createDraftForSend(call);
+  const prepared = await call("drafts.send.prepare", { draftRef: created.result.draftRef });
+
+  // 模拟用户在 prepare 之后、confirm 之前，去 options 页面取消勾选外发能力
+  // （对应 extension/src/options.ts 的 permissions.remove() 调用）。
+  ctx.browserWrite.setSendPermissionGranted(false);
+
+  const denied = await call("drafts.send.confirm", {
+    draftRef: created.result.draftRef, confirmationId: prepared.result.confirmationId, draftRevision: prepared.result.revision,
+  });
+  assert.equal(denied.errorCode, "E_POLICY_DENIED");
+  assert.equal(ctx.browserWrite.sendAttempts.length, 0);
 });
 
 // ---------------------------------------------------------------------------

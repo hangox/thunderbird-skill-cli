@@ -14,9 +14,9 @@ import { join } from "node:path";
 
 const DEFAULT_STATUS = {
   protocolVersion: 1,
-  minCliVersion: "0.3.0",
-  maxCliVersion: "0.3.0",
-  extensionVersion: "0.3.0",
+  minCliVersion: "0.4.0",
+  maxCliVersion: "0.4.0",
+  extensionVersion: "0.4.0",
   pairingState: "paired",
   pairingEpoch: "0",
   capabilities: ["mail.read.v1", "mail.reversible.v1", "draft.write.v1", "mail.send-confirmed.v1"],
@@ -73,7 +73,7 @@ export async function startFakeMailApi(t, options = {}) {
     pid: process.pid,
     port: address.port,
     sessionToken: "5".repeat(64),
-    extensionVersion: "0.3.0",
+    extensionVersion: "0.4.0",
     pairingEpoch: "0",
     startedAt: "2026-07-25T00:00:00.000Z",
     expiresAt: "2099-07-25T01:00:00.000Z",

@@ -124,10 +124,11 @@ test("recordAudit：outcome=error 走 console.error，success/denied 走 console
   assert.equal(parseLine(cap.errors[0]).reason, "send-failed");
 });
 
-test("recordAudit：全部 9 个合法 AuditReason 枚举值都被保留", () => {
+test("recordAudit：全部 10 个合法 AuditReason 枚举值都被保留", () => {
   const reasons = [
     "too-large", "too-large-actual", "reused-tab", "reopened-from-template",
     "confirm-not-found", "revision-mismatch", "tab-closed", "live-digest-mismatch", "send-failed",
+    "send-permission-missing",
   ];
   const cap = captureConsole();
   try {

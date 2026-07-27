@@ -124,6 +124,7 @@ events`（日历）三项**不在本轮交付范围内**，不接受任何参数
 | `E_TIMEOUT` | 只读可重试；写操作先查询状态 |
 | `E_PAIRING_CHANGED` | 配对代已变更（通常刚撤销过配对）；重新运行命令，不要自动重试写操作 |
 | `draft send --confirm` 返回 `E_INTERNAL` | 读取 `error.details.operationId`，调用 `operations get OPERATION_ID` 确认最终是否已发送；不要凭空重试 `--confirm`（confirmationId 已一次性消费） |
+| `draft send --confirm` 返回 `E_POLICY_DENIED` | 外发能力可能是 capability 未授予，也可能是浏览器层 `compose.send` 可选权限未同意（即使 capability 已勾选）；两种情况都需要用户去 Thunderbird 扩展 options 页面重新检查并显式启用外发确认能力，CLI/Skill 都无法代为授权。**confirmationId 未被消费**——补授权后可直接用同一个 `--confirm` 输入重试，不必重新 `--prepare` |
 
 ## 退出码
 

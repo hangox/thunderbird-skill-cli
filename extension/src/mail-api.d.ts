@@ -166,13 +166,26 @@ interface MessageMoveOptions {
 }
 
 /**
- * compose 域（草稿/外发，`compose`/`compose.save` 权限已申请；`compose.send`
- * 权限刻意未申请，见 manifest.json 顶部说明与 docs/09 附录 A.1——`sendMessage`
- * 因此在真实 Thunderbird 环境中会因权限缺失而拒绝，这是"禁止真实发送"的
- * 物理保证，而不仅是代码层判断）。
+ * compose 域（草稿/外发，`compose`/`compose.save` 权限已申请）。
  *
- * `ComposeDetails` 字段覆盖范围基于 docs/01 附录 A 核对的官方文档子集，只列出
- * 草稿/外发域实际用到的字段。
+ * `compose.send`（Task #44，0.4.0）是独立于 `compose`/`compose.save` 的可选
+ * 权限（manifest.json 的 `optional_permissions`，不在常驻 `permissions`
+ * 里）：官方文档明确 `compose.sendMessage()` 需要 `compose.send`
+ * （`webextension-api.thunderbird.net` compose 页 sendMessage 条目标注
+ * "Required permissions: compose.send"，TB 90 起可用），且该权限属于可通过
+ * `permissions.request()`/`permissions.remove()`/`permissions.contains()`
+ * 在运行时管理的 OptionalPermission（同上 permissions 页 request() 条目，
+ * 非 PermissionNoPrompt/PermissionPrivileged 类型）。默认不在 manifest 常驻
+ * permissions 里意味着用户首次启用外发能力前，`compose.sendMessage()`
+ * 物理不可用；`mail/send.ts` 的 `draftsSendConfirm` 在真正调用它之前，会
+ * 额外用 `browser.permissions.contains({permissions:["compose.send"]})`
+ * 独立确认——不信任"capability 系统里 mail.send-confirmed.v1 已授予"就
+ * 等于"浏览器层权限也已授予"这个假设，两者是可能互相漂移的两套独立状态
+ * （例如用户可能绕过 options 页面、直接在 Thunderbird 自己的插件管理页面
+ * 撤销权限）。
+ *
+ * `ComposeDetails` 字段覆盖范围基于官方文档核对的子集，只列出草稿/外发域
+ * 实际用到的字段。
  */
 interface ComposeDetails {
   identityId?: string;
@@ -209,7 +222,28 @@ interface ComposeSendResult {
   mode?: string;
 }
 
+/** `permissions.request/remove/contains()` 的入参形状；本仓库只用 `permissions` 字段（`compose.send`），不涉及 `origins`。 */
+interface PermissionsRequest {
+  permissions?: string[];
+  origins?: string[];
+}
+
 interface Browser {
+  /**
+   * 标准 WebExtension `permissions` API（TB 55+，request 需要用户手势触发，
+   * 例如 options 页面表单提交事件——见 `extension/src/options.ts`）。
+   * 与 `thunderbirdSkillBridge` 那个 Experiment API 是完全独立的两套权限
+   * 体系：Experiment API 的"完全访问"授权发生在扩展安装时，一次性、全有
+   * 全无；这里的 `permissions` 是标准 WebExtension 可选权限，按单个字符串
+   * 粒度、可在扩展运行期间随时请求/撤销，且只影响非特权（`background.ts`
+   * 等普通背景页作用域）代码能调用哪些标准 `browser.*` 方法——两者不冲突、
+   * 不互相包含。
+   */
+  permissions: {
+    request(permissions: PermissionsRequest): Promise<boolean>;
+    remove(permissions: PermissionsRequest): Promise<boolean>;
+    contains(permissions: PermissionsRequest): Promise<boolean>;
+  };
   accounts: {
     list(includeFolders?: boolean): Promise<MailAccount[]>;
     get(accountId: string, includeFolders?: boolean): Promise<MailAccount | null>;

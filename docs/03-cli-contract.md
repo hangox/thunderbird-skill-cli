@@ -112,6 +112,8 @@ thunderbird [--json|--human] [--instance ID|--profile ID] [--timeout MS] <comman
 
 真实发送在 Thunderbird 侧失败时（`E_INTERNAL`），错误 `message` 只是人类可读文案，不包含可解析的 operation id；程序化查询最新状态必须读取结构化的 `error.details.operationId`（见下方 stdout JSON schema），再调用 `operations get OPERATION_ID` 确认是否已发送成功——`details` 是一个封闭 allowlist，目前唯一合法字段就是 `operationId`，任何其他字段（token/nonce/路径/正文等）都不会出现在这里。
 
+真实发送权限本身是**可选**的（0.4.0 起）：`compose.send` 声明在扩展 `manifest.json` 的 `optional_permissions` 而不是常驻 `permissions` 里，默认不持有，此时 `--confirm` 精确返回 `E_POLICY_DENIED`（不是 `E_INTERNAL`）。用户必须在 Thunderbird 扩展 options 页面显式勾选"外发确认"能力并同意浏览器原生权限弹窗后才会真正解锁；这一步无法由 CLI 代为完成，也不接受任何绕过参数。缺权限时 `confirmationId` 不会被消费，补授权后可直接重试同一个 `--confirm` 输入。
+
 ## stdout JSON schema
 
 成功：

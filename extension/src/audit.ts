@@ -39,11 +39,13 @@ export type AuditReason =
   | "revision-mismatch"
   | "tab-closed"
   | "live-digest-mismatch"
-  | "send-failed";
+  | "send-failed"
+  | "send-permission-missing";
 
 const AUDIT_REASONS: ReadonlySet<string> = new Set<AuditReason>([
   "too-large", "too-large-actual", "reused-tab", "reopened-from-template",
   "confirm-not-found", "revision-mismatch", "tab-closed", "live-digest-mismatch", "send-failed",
+  "send-permission-missing",
 ]);
 
 export interface AuditEvent {

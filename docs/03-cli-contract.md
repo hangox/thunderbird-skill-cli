@@ -41,7 +41,9 @@ thunderbird [--json|--human] [--instance ID|--profile ID] [--timeout MS] <comman
 | `draft open` | `DRAFT_REF` | 只读/UI | Phase 2 |
 | `draft send` | `DRAFT_REF --confirm FILE\|-` | 外发 | Phase 3 |
 | `attachments list` | `MESSAGE_REF` | 只读 | MVP |
-| `attachments save` | `--input FILE\|-` | 可逆/文件写入 | Phase 2 |
+| `attachments save` | `--input FILE\|-`（`attachmentRef` + 本机 `directory`） | 可逆/文件写入 | Phase 2 |
+| `operations get` | `OPERATION_REF` | 只读 | Phase 2 |
+| `operations undo` | `UNDO_TOKEN` | 可逆 | Phase 2 |
 | `calendar list` | 无 | 只读 | Phase 3 |
 | `calendar events` | `--input FILE\|-` | 只读 | Phase 3 |
 | `watch` | `--events ... --duration SEC` | 只读/长运行 | Future |
@@ -229,7 +231,24 @@ CLI 不暴露可猜测的数据库主键或原始 folder URI。扩展生成带�
 }
 ```
 
-undo token 只能恢复该操作，短期有效、一次性使用，并绑定 instance 与调用者配对。
+undo token 只能恢复该操作，短期有效、一次性使用，并绑定 instance 与调用者配对。用户明确要求撤销时，用 `operations undo UNDO_TOKEN` 提交该 token；过期、已使用或跨 client 均失败关闭，不重试。
+
+## 附件保存：两阶段授权 + 分块拉取 + 本机安全落盘
+
+`attachments save` 的 `--input` 提供 `attachmentRef`（来自 `attachments list`）与本机绝对 `directory`：
+
+```json
+{ "attachmentRef": "attachment_...", "directory": "/Users/me/Downloads" }
+```
+
+`directory` 只在 CLI 本地使用，从不发送给扩展。CLI 依次：
+
+1. 调用 `attachments.save` route 用 `attachmentRef` 换取元数据（`name`/`contentType`/`size`/`digest`）与一次性 `fetchToken`；扩展不接收也不校验任何本机路径，原始附件总大小超过硬上限时直接拒绝签发 token。
+2. 用 `fetchToken` 循环调用 `attachments.fetch`，以不透明 `cursor` 严格单调续取 JSON 内联 base64 分块，直至 `cursor` 为 `null`；乱序/重放/未推进的 `cursor` 一律失败关闭。
+3. 在目标同目录以 `O_NOFOLLOW|O_EXCL` 创建临时文件，边拉取边写入；全部写完后校验总长度与 `sha256` 摘要，用 `link()`（而非会静默覆盖的 `rename()`）原子发布到最终文件名（取自附件自身名称，规范化、不解释为路径），已存在则拒绝（no-clobber）。
+4. 任何一步失败（长度/摘要不符、`cursor` 异常、token 过期/复用/跨 client、网络中断）都清理临时文件，不留下半成品；已存在的文件不会被覆盖。
+
+目标目录必须是绝对路径、真实存在、解析后不落在敏感系统路径、不是设备/管道/套接字文件；相对路径与路径穿越一律拒绝。
 
 ## `watch` 约束
 
@@ -240,9 +259,11 @@ undo token 只能恢复该操作，短期有效、一次性使用，并绑定 in
 CLI 外壳（全局/命令级参数解析、`--input`/stdin 输入、envelope 输出、实例发现与
 client 身份加载）与全部只读/可逆/草稿-外发邮件命令（`accounts list`、`folders
 list`、`search`、`recent`、`message get/open/mark/move/trash`、`draft
-create/update/open/send`、`attachments list/save`、`operations get`）已按本文件
-与 `src/contracts/routes.ts` 冻结的 route 表完整挂载：CLI 会正确构造签名请求并
-发往 Thunderbird 扩展。
+create/update/open/send`、`attachments list/save`、`operations get/undo`）已按
+本文件与 `src/contracts/routes.ts` 冻结的 route 表完整挂载：CLI 会正确构造签名
+请求并发往 Thunderbird 扩展。`attachments save` 是两条 route（`attachments.save`
+授权 + `attachments.fetch` 分块拉取）编排出的单个 CLI 命令，附带本机安全落盘
+（`src/paths.ts`：no-clobber、敏感路径/符号链接/设备文件拒绝、原子发布、失败清理）。
 
 `message delete`（永久删除）、`watch`、`calendar list/events` 三项本轮明确不
 纳入交付范围：不冻结对应 route、不接受任何参数，恒定返回 `E_NOT_IMPLEMENTED`。

@@ -32,11 +32,28 @@ thunderbird [--json|--human] [--instance ID|--profile ID] <command> [args]
 | `draft send REF --prepare` | 获取最新发送摘要与 confirmation ID | 外发准备 |
 | `draft send REF --confirm FILE\|-` | 提交具体、一次性发送确认 | 外发 |
 | `attachments list REF` | 列出附件元数据 | 只读 |
-| `attachments save --input FILE\|-` | 保存到显式目录，默认不覆盖 | 可逆 |
+| `attachments save --input FILE\|-` | 保存到显式目录，默认不覆盖（见下方说明） | 可逆 |
 | `operations get REF` | 查询可逆/外发操作的当前状态（如 undo/发送确认） | 只读 |
+| `operations undo UNDO_TOKEN` | 用一次性 undo token 撤销一次可逆操作 | 可逆 |
 
-引用参数（`REF`）一律是扩展签发的 opaque ref（`msg_...`/`draft_...`/`acc_...`/
-`folder_...`/`op_...`），不是数据库主键；`REF` 失效时应重新查询而不是重试。
+引用参数（`REF`/`UNDO_TOKEN`）一律是扩展签发的 opaque ref（`msg_...`/`draft_...`/
+`acc_...`/`folder_...`/`op_...`/`undo_...`），不是数据库主键；失效时应重新
+查询而不是重试。undo token 一次性使用，成功撤销或过期后不能重复提交。
+
+### `attachments save` 的 `--input` 字段
+
+```json
+{ "attachmentRef": "attachment_...", "directory": "/Users/me/Downloads" }
+```
+
+- `attachmentRef` 来自 `attachments list REF` 的返回结果。
+- `directory` 是**本机绝对路径**，只在 CLI 本地使用，从不发送给 Thunderbird
+  扩展——扩展只按 `attachmentRef` 授权内容与摘要，不接收也不校验任何文件
+  系统路径；no-clobber、敏感路径/符号链接/设备文件拒绝、原子发布完全由 CLI
+  负责。最终文件名取自附件自身的名称（经规范化，不解释为路径），不可通过
+  `directory` 之外的字段指定文件名或路径穿越。
+- 目标文件已存在（含悬空符号链接）时拒绝，不覆盖；下载中断、长度或摘要不
+  匹配时不留下任何半成品文件。
 
 ## 本轮明确不支持
 

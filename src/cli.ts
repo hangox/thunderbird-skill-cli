@@ -11,9 +11,16 @@
 // 引用与 help 展示），但这里刻意不为它们分配 arg spec 或 mail mount——
 // 不接受任何参数，落到函数末尾统一的 E_NOT_IMPLEMENTED 兜底，不会被误当作
 // 0.3.0 可用能力挂载出去。
+//
+// attachments save 是本轮唯一"一个 CLI 命令对应两条 route 且需要本机文件
+// I/O"的例外，同样不进 MAIL_MOUNTS 泛化表：src/contracts/routes.ts 明确
+// attachments.save（授权+元数据+一次性 fetch token）与 attachments.fetch
+// （循环拉取 JSON 内联 base64 分块）都映射到该命令，且"扩展不接收也不校验
+// 任何本机文件系统路径"——no-clobber/敏感路径/symlink/设备文件拒绝与安全
+// 落盘完全是 CLI 的职责，见 runAttachmentsSave() 与 src/paths.ts。
 import { createRequestId } from "./contracts/envelope.js";
 import { findCommand } from "./contracts/commands.js";
-import { findMailRoutesByCommand } from "./contracts/routes.js";
+import { ATTACHMENT_FETCH_MAX_CHUNK_ENCODED_BYTES, ATTACHMENT_FETCH_MAX_TOTAL_BYTES, findMailRoutesByCommand } from "./contracts/routes.js";
 import { createSigningIdentityInKeychain, loadSigningIdentityFromKeychain } from "./auth.js";
 import { discoverInstances, DiscoveryError } from "./discovery.js";
 import { locateXpi, revealInFinder, XPI_FILE_NAME } from "./xpi.js";
@@ -26,6 +33,7 @@ import {
 import { EXIT, emitError, emitSuccess, printHelp } from "./output.js";
 import { mergeField, readInputPayload } from "./input.js";
 import { discoverAndSelect, loadOptionalIdentity, requireMailIdentity } from "./session.js";
+import { openAttachmentTempFile, resolveSafeDirectory } from "./paths.js";
 
 // ---------------------------------------------------------------------------
 // 邮件命令挂载表：命令路径字符串 -> {命令级 arg spec, 输入 flag（若有）, body 构造}。
@@ -138,23 +146,27 @@ const MAIL_MOUNTS: Readonly<Record<string, MailMount>> = {
     spec: { positionals: [ref("messageRef", "msg")] },
     buildBody: ({ positionals }) => ({ messageRef: positionals.messageRef }),
   },
-  "attachments save": {
-    spec: { flags: { "--input": { type: "file" } } },
-    inputFlag: "--input",
-    inputRequired: true,
-    buildBody: ({ input }) => ({ ...(input ?? {}) }),
-  },
   "operations get": {
     spec: { positionals: [ref("operationId", "op")] },
     buildBody: ({ positionals }) => ({ operationId: positionals.operationId }),
   },
+  "operations undo": {
+    spec: { positionals: [ref("undoToken", "undo")] },
+    buildBody: ({ positionals }) => ({ undoToken: positionals.undoToken }),
+  },
 };
 
-// draft send 是本轮唯一"一个 CLI 命令对应两条 route"的例外（prepare/confirm
+// draft send 是"一个 CLI 命令对应两条 route"的例外之一（prepare/confirm
 // 两阶段确认，见 docs/03 §发送确认），因此单独处理，不进 MAIL_MOUNTS 泛化表。
 const DRAFT_SEND_SPEC: CommandArgSpec = {
   positionals: [ref("draftRef", "draft")],
   flags: { "--prepare": { type: "boolean" }, "--confirm": { type: "file" } },
+};
+
+// attachments save 是另一个例外：授权（attachments.save）与分块拉取
+// （attachments.fetch）两条 route + 本机安全落盘，见 runAttachmentsSave()。
+const ATTACHMENTS_SAVE_SPEC: CommandArgSpec = {
+  flags: { "--input": { type: "file" } },
 };
 
 const COMMAND_ARG_SPECS: Readonly<Record<string, CommandArgSpec>> = {
@@ -164,6 +176,7 @@ const COMMAND_ARG_SPECS: Readonly<Record<string, CommandArgSpec>> = {
   "xpi path": EMPTY_ARG_SPEC,
   "xpi reveal": EMPTY_ARG_SPEC,
   "draft send": DRAFT_SEND_SPEC,
+  "attachments save": ATTACHMENTS_SAVE_SPEC,
   ...Object.fromEntries(Object.entries(MAIL_MOUNTS).map(([command, mount]) => [command, mount.spec])),
 };
 
@@ -292,6 +305,130 @@ async function runDraftSend(parsed: ParsedCommandArguments, options: GlobalOptio
   return emitSuccess("draft send", data, options.human, startedAt);
 }
 
+// ---------------------------------------------------------------------------
+// attachments save：授权（attachments.save）+ 循环分块拉取（attachments.fetch）
+// + 本机安全落盘（src/paths.ts）。
+//
+// 响应字段名（name/contentType/size/digest/fetchToken；attachments.fetch 的
+// chunk/cursor）是本命令行层面按 contracts/routes.ts 冻结的常量与既有
+// digest 约定（"sha256:<hex>"，与 draft send 的 draftRevision 一致）推导出的
+// 约定，不是业务 schema 的权威来源——扩展侧尚未实现这两条 route 的真实
+// handler（Task #29/#30 之外的独立后续任务）；一旦落地，如字段命名不同，只
+// 需要调整本文件这一小段解析/构造逻辑，不影响 CLI 外壳其余部分。
+// ---------------------------------------------------------------------------
+
+interface AttachmentsSaveAuthorization {
+  readonly name: string;
+  readonly contentType: string;
+  readonly size: number;
+  readonly digest: string;
+  readonly fetchToken: string;
+}
+
+function parseAttachmentsSaveAuthorization(value: unknown): AttachmentsSaveAuthorization {
+  if (typeof value !== "object" || value === null) throw new TransportError("E_VALIDATION", "attachments.save 响应格式不合法");
+  const record = value as Record<string, unknown>;
+  if (typeof record.name !== "string" || record.name.length === 0) throw new TransportError("E_VALIDATION", "attachments.save 响应缺少合法 name");
+  if (typeof record.contentType !== "string" || record.contentType.length === 0) throw new TransportError("E_VALIDATION", "attachments.save 响应缺少合法 contentType");
+  if (!Number.isInteger(record.size) || (record.size as number) < 0) throw new TransportError("E_VALIDATION", "attachments.save 响应 size 不合法");
+  if (typeof record.digest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(record.digest)) throw new TransportError("E_VALIDATION", "attachments.save 响应 digest 不合法");
+  if (typeof record.fetchToken !== "string" || record.fetchToken.length === 0) throw new TransportError("E_VALIDATION", "attachments.save 响应缺少 fetchToken");
+  return { name: record.name, contentType: record.contentType, size: record.size as number, digest: record.digest, fetchToken: record.fetchToken };
+}
+
+interface AttachmentsFetchChunk {
+  readonly chunkBase64: string;
+  readonly nextCursor: string | null;
+}
+
+const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+
+function parseAttachmentsFetchChunk(value: unknown): AttachmentsFetchChunk {
+  if (typeof value !== "object" || value === null) throw new TransportError("E_VALIDATION", "attachments.fetch 响应格式不合法");
+  const record = value as Record<string, unknown>;
+  if (typeof record.chunk !== "string" || !BASE64_PATTERN.test(record.chunk)) throw new TransportError("E_VALIDATION", "attachments.fetch 响应 chunk 不是合法 base64");
+  if (record.cursor !== null && typeof record.cursor !== "string") throw new TransportError("E_VALIDATION", "attachments.fetch 响应 cursor 不合法");
+  return { chunkBase64: record.chunk, nextCursor: record.cursor as string | null };
+}
+
+/** 附件原始总大小不可能超过这个块数（每块至少推进一些进度）；防止扩展异常/恶意场景下 cursor 永不为 null 造成无限轮询。 */
+const MAX_ATTACHMENT_FETCH_ITERATIONS = 20_000;
+
+async function runAttachmentsSave(parsed: ParsedCommandArguments, options: GlobalOptions, startedAt: number): Promise<never> {
+  const identity = await requireMailIdentity(options);
+  const instance = await discoverAndSelect(options);
+  const input = await readInputPayload(parsed.flags["--input"] as string | undefined, { required: true, flagName: "--input" });
+  const attachmentRef = input?.attachmentRef;
+  const directory = input?.directory;
+  if (typeof attachmentRef !== "string") throw new DiscoveryError("E_VALIDATION", "--input 缺少 attachmentRef 字段");
+  if (typeof directory !== "string") {
+    throw new DiscoveryError("E_VALIDATION", "--input 缺少 directory 字段（本机绝对目标目录；此字段只在 CLI 本地使用，不会发送给扩展）");
+  }
+  // 尽早校验目标目录本身的安全性（绝对路径/存在/非 symlink 解析异常/非
+  // 敏感路径/非设备文件），避免对一个注定写不进去的目录先浪费一次授权+
+  // 网络往返；文件名相关的 no-clobber 检查需要 attachments.save 返回的
+  // metadata.name，只能等授权完成后在 openAttachmentTempFile() 里做。
+  await resolveSafeDirectory(directory);
+
+  const routes = findMailRoutesByCommand(["attachments", "save"]);
+  const saveRoute = routes.find((candidate) => candidate.id === "attachments.save");
+  const fetchRoute = routes.find((candidate) => candidate.id === "attachments.fetch");
+  if (!saveRoute || !fetchRoute) throw new Error("attachments.save/attachments.fetch 路由缺失");
+
+  const authorized = await callMailRoute(instance.descriptor, saveRoute, { attachmentRef }, options.timeoutMs, identity);
+  const metadata = parseAttachmentsSaveAuthorization(authorized);
+  if (metadata.size > ATTACHMENT_FETCH_MAX_TOTAL_BYTES) {
+    // 双重保险：扩展本应在授权阶段就因超限拒绝签发 fetch token，这里是纵深防御。
+    throw new TransportError("E_VALIDATION", "附件总大小超过契约硬上限");
+  }
+
+  // 目标同目录安全临时文件在这里创建（O_NOFOLLOW|O_EXCL），早于任何网络拉取，
+  // 让路径穿越/symlink/设备文件/敏感路径/已存在等本地校验尽早失败，不浪费
+  // 一次授权+网络往返。
+  const handle = await openAttachmentTempFile(directory, metadata.name);
+  try {
+    let cursor: string | null = null;
+    let first = true;
+    let totalDecodedBytes = 0;
+    let iterations = 0;
+    while (first || cursor !== null) {
+      first = false;
+      iterations += 1;
+      if (iterations > MAX_ATTACHMENT_FETCH_ITERATIONS) throw new TransportError("E_TIMEOUT", "附件分块拉取轮询次数超过安全上限", false);
+      const requestedCursor: string | null = cursor;
+      const body: Record<string, unknown> = { fetchToken: metadata.fetchToken, ...(requestedCursor !== null ? { cursor: requestedCursor } : {}) };
+      const response = await callMailRoute(instance.descriptor, fetchRoute, body, options.timeoutMs, identity);
+      const chunk = parseAttachmentsFetchChunk(response);
+      // 服务端返回的下一个 cursor 与本次请求所用的 cursor 完全相同，说明没有
+      // 任何进展（重放或异常响应），必须失败关闭，否则会无限轮询。
+      if (chunk.nextCursor !== null && chunk.nextCursor === requestedCursor) {
+        throw new TransportError("E_VALIDATION", "attachments.fetch 返回的 cursor 未推进，疑似重放或异常响应");
+      }
+      if (chunk.chunkBase64.length > 0) {
+        if (Buffer.byteLength(chunk.chunkBase64, "utf8") > ATTACHMENT_FETCH_MAX_CHUNK_ENCODED_BYTES) {
+          throw new TransportError("E_VALIDATION", "attachments.fetch 单块 base64 长度超过契约硬上限");
+        }
+        const decoded = Buffer.from(chunk.chunkBase64, "base64");
+        totalDecodedBytes += decoded.length;
+        if (totalDecodedBytes > metadata.size) throw new TransportError("E_VALIDATION", "附件实际拉取字节超过声明大小");
+        await handle.write(decoded);
+      }
+      cursor = chunk.nextCursor;
+    }
+    const result = await handle.finish({ totalBytes: metadata.size, sha256Digest: metadata.digest });
+    return emitSuccess("attachments save", {
+      attachmentRef,
+      path: result.finalPath,
+      bytes: result.bytesWritten,
+      name: metadata.name,
+      contentType: metadata.contentType,
+    }, options.human, startedAt);
+  } catch (error) {
+    await handle.abort();
+    throw error;
+  }
+}
+
 async function main(): Promise<void> {
   const startedAt = Date.now();
   let options: GlobalOptions;
@@ -328,6 +465,7 @@ async function main(): Promise<void> {
     const mount = MAIL_MOUNTS[command];
     if (mount) await runMailMount(command, spec.path, mount, parsed, options, startedAt);
     if (command === "draft send") await runDraftSend(parsed, options, startedAt);
+    if (command === "attachments save") await runAttachmentsSave(parsed, options, startedAt);
     // message delete / calendar list|events / watch 及其余未接线命令统一落到这里。
     return emitError(command, "E_NOT_IMPLEMENTED", "该命令本轮未纳入交付范围或邮件适配层尚未接线", false, options.human);
   } catch (error) {

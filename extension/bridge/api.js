@@ -513,8 +513,8 @@ function createLoopbackServer(preflight, dispatch) {
 // ---------------------------------------------------------------------------
 // 邮件 route 通用管线：反原型污染的 body 守卫、opaque ref 绑定表、静态
 // route registry，以及把已认证请求转发给 background 执行的 Experiment→
-// background operation 通道（onMailRouteRequest 事件 + respondMailRoute/
-// failMailRoute 两个回调函数）。这是 extension/src/schema.ts、
+// background operation 通道（onOperation 事件 + respondToOperation/
+// failOperation 两个回调函数）。这是 extension/src/schema.ts、
 // extension/src/refs.ts、src/contracts/routes.ts 三份纯 TS 参考实现在
 // Experiment 特权作用域下的运行时镜像——这里无法 `import` 编译产物，只能像
 // 本文件既有的 canonical()/isEd25519Spki() 那样手动保持同步，由测试兜底
@@ -547,12 +547,18 @@ function assertNoDangerousKeys(value) {
   }
 }
 
+// 单个 ref 允许的最长存活时间：即使调用方传入更大的 ttlMs 也会被拒绝，不
+// 静默接受一个长期存活、扩大暴露窗口的 ref。与 extension/src/refs.ts 的
+// MAX_REF_TTL_MS 保持一致。
+const MAX_REF_TTL_MS = 30 * 60 * 1000;
+
 // issue() 因配额耗尽而拒绝时抛出的显式类型错误，调用方可据此与其他内部错误
-// 区分，映射为稳定的错误语义而不是笼统的 500。与 extension/src/refs.ts 的
+// 区分，映射为稳定的错误语义而不是笼统的 500。kind === "*" 表示命中的是跨
+// kind 的全局在途上限，不是某个具体 kind 的上限。与 extension/src/refs.ts 的
 // RefStoreCapacityError 是同一份设计的镜像。
 class RefStoreCapacityError extends Error {
   constructor(kind, limit) {
-    super(`ref kind ${kind} 已达到在途上限（${limit}），拒绝签发新 ref`);
+    super(kind === "*" ? `ref store 已达到全局在途上限（${limit}），拒绝签发新 ref` : `ref kind ${kind} 已达到在途上限（${limit}），拒绝签发新 ref`);
     this.name = "RefStoreCapacityError";
     this.kind = kind;
     this.limit = limit;
@@ -563,7 +569,7 @@ class RefStoreCapacityError extends Error {
 // 进程，扩展实例在 Thunderbird 会话内长期存活，因此用内存绑定表（token →
 // {kind, clientId, pairingEpoch, payload, 过期时间}）而非自描述签名令牌；
 // resolve 要求 clientId 与 pairingEpoch 精确匹配，任一不符一律视为不存在。
-function createRefStore(maxEntriesPerKind = 4000) {
+function createRefStore(maxEntriesPerKind = 4000, maxTotalEntries = 20000) {
   const entries = new Map();
   const countByKind = new Map();
   function remove(token) {
@@ -582,7 +588,11 @@ function createRefStore(maxEntriesPerKind = 4000) {
     },
     issue(kind, clientId, pairingEpoch, payload, ttlMs) {
       if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new RangeError("ttlMs 必须是正有限数");
+      if (ttlMs > MAX_REF_TTL_MS) throw new RangeError(`ttlMs 不得超过 MAX_REF_TTL_MS（${MAX_REF_TTL_MS}ms）`);
       this.prune();
+      // 全局上限是压力回收的第二道防线：即使每个 kind 各自都没超限，合计条目
+      // 数也不得无界增长。
+      if (entries.size >= maxTotalEntries) throw new RefStoreCapacityError("*", maxTotalEntries);
       const current = countByKind.get(kind) ?? 0;
       if (current >= maxEntriesPerKind) throw new RefStoreCapacityError(kind, maxEntriesPerKind);
       const nowMs = Date.now();
@@ -609,10 +619,8 @@ function createRefStore(maxEntriesPerKind = 4000) {
   };
 }
 
-// 范围裁决（team-lead，2026-07-27）：v0.3.0 不实现永久删除，因此这里不再
-// 提供 message delete prepare/confirm 专用的 UI 人工确认回执登记表；
 // draft send 的 prepare/confirm 外发确认走 RefStore 的 "confirm" kind
-// （revision/收件人/主题/附件 digest 绑定），不需要额外的 UI 回执原语。
+// （revision/收件人/主题/附件 digest 绑定）。
 
 const MAIL_ROUTE_PREFIX = "/v1/mail/";
 
@@ -640,12 +648,17 @@ const MAIL_ROUTES = [
   // watch（bounded JSONL 事件流）本轮不实现，无对应 route（team-lead 范围裁决 2026-07-27）。
 ];
 
+// 与 src/contracts/routes.ts 的 MAIL_CAPABILITIES 逐条对应；setMailCapabilities
+// 用它拒绝任何未知字符串，不接受 MAIL_ROUTES 之外声明过的死能力（如
+// calendar.read.v1）。
+const KNOWN_MAIL_CAPABILITIES = new Set(["mail.read.v1", "mail.reversible.v1", "draft.write.v1", "mail.send-confirmed.v1"]);
+
 function findMailRoute(method, path) {
   if (method !== "POST") return undefined;
   return MAIL_ROUTES.find((route) => route.path === path);
 }
 
-// background 用 failMailRoute 报告的错误码只信任这个已知集合，其余一律降级
+// background 用 failOperation 报告的错误码只信任这个已知集合，其余一律降级
 // 为 E_INTERNAL/500，防止业务侧的任意字符串直接冒充协议错误码进入 HTTP 响应。
 const MAIL_ROUTE_ERROR_STATUS = {
   E_NOT_IMPLEMENTED: 501,
@@ -660,7 +673,7 @@ const MAIL_ROUTE_ERROR_STATUS = {
 
 // 只在缺少 ExtensionCommon.EventManager 的环境（当前测试夹具）下生效的等价
 // 实现：register(fire) 在监听者数量 0→1 时调用一次并返回 unregister，
-// 语义与真实 EventManager 完全一致，因此 createMailRouteChannel 的其余逻辑
+// 语义与真实 EventManager 完全一致，因此 createOperationChannel 的其余逻辑
 // 不需要区分两条分支。真实 Thunderbird 环境优先使用 ExtensionCommon.EventManager，
 // 这样跨进程的 background↔特权层通信走 WebExtension 既定的结构化克隆通道。
 function createEventManager(context, name, register) {
@@ -688,14 +701,14 @@ function createEventManager(context, name, register) {
 
 // api.js 本身不实现任何邮件业务语义、不调用任何邮件相关的 XPCOM 组件：
 // 认证/capability/body 上限/反原型污染校验通过后，把请求经
-// onMailRouteRequest 事件转发给 background；background 用标准
-// MailExtension API 执行真正的业务逻辑，再调用 respondMailRoute /
-// failMailRoute 之一唤醒这里挂起的 Promise。这个文件只负责转发、超时与
+// onOperation 事件转发给 background；background 用标准
+// MailExtension API 执行真正的业务逻辑，再调用 respondToOperation /
+// failOperation 之一唤醒这里挂起的 Promise。这个文件只负责转发、超时与
 // 错误码翻译。
-function createMailRouteChannel(context) {
+function createOperationChannel(context) {
   const pending = new Map(); // token -> { resolve, reject, timer }
   let fireEvent = null;
-  const event = createEventManager(context, "thunderbirdSkillBridge.onMailRouteRequest", (fire) => {
+  const event = createEventManager(context, "thunderbirdSkillBridge.onOperation", (fire) => {
     fireEvent = fire;
     return () => { fireEvent = null; };
   });
@@ -785,7 +798,7 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
       receipts: new Map(),
       nonces: new Map(),
       refStore: createRefStore(),
-      mailRouteChannel: createMailRouteChannel(context),
+      operationChannel: createOperationChannel(context),
       error: null,
       startPromise: null,
       expiryTimer: null,
@@ -802,7 +815,7 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
       state.server = null;
       state.sessionToken = null;
       state.refStore.clear();
-      state.mailRouteChannel.clear(reason ?? "本地会话已停止");
+      state.operationChannel.clear(reason ?? "本地会话已停止");
       removeDescriptor(state.instanceId);
       state.descriptorPath = null;
       state.error = reason ?? state.error;
@@ -1034,9 +1047,9 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
         ensureEpochUnchanged(req);
         // api.js 到此为止：不解释任何邮件业务语义，只把已认证/已过 capability
         // 门禁/已过反原型污染校验的请求转发给 background，等待其经
-        // respondMailRoute/failMailRoute 之一唤醒。
-        const token = `mreq_${randomHex(16)}`;
-        const result = await state.mailRouteChannel.dispatch(token, req.mailRoute.id, req.mailRoute.capability, JSON.stringify(body), req.deadlineAt);
+        // respondToOperation/failOperation 之一唤醒。
+        const token = `opreq_${randomHex(16)}`;
+        const result = await state.operationChannel.dispatch(token, req.mailRoute.id, req.mailRoute.capability, JSON.stringify(body), req.deadlineAt);
         ensureEpochUnchanged(req);
         writeJson(res, 200, result);
         return;
@@ -1143,9 +1156,22 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
         // background 处理完（或判定未实现/拒绝）一条转发来的邮件 route 请求后
         // 调用两者之一，唤醒 dispatch() 里挂起的 Promise；找不到对应 token
         // （已超时/已响应过）时静默忽略，不对 background 暴露内部时序细节。
-        respondMailRoute: async (token, resultJson) => { state.mailRouteChannel.respond(token, resultJson); },
-        failMailRoute: async (token, errorCode, errorMessage) => { state.mailRouteChannel.fail(token, errorCode, errorMessage); },
-        onMailRouteRequest: state.mailRouteChannel.event,
+        respondToOperation: async (token, resultJson) => { state.operationChannel.respond(token, resultJson); },
+        failOperation: async (token, errorCode, errorMessage) => { state.operationChannel.fail(token, errorCode, errorMessage); },
+        onOperation: state.operationChannel.event,
+        // 账号/能力授权 UI（Task #30/mail-write）写入已配对 client capabilities
+        // 的唯一入口；E1 只提供该入口本身，不实现调用它的 UI。覆盖式写入
+        // （不是增量 add），生产环境在该 UI 存在并调用它之前，capabilities
+        // 恒为 confirmPairing 写入的空集，全部邮件 route 因此保持失败关闭。
+        setMailCapabilities: async (capabilities) => {
+          if (!state.pairing) throw new Error("未配对，无法设置 capabilities");
+          if (!Array.isArray(capabilities) || !capabilities.every((value) => typeof value === "string" && KNOWN_MAIL_CAPABILITIES.has(value))) {
+            throw new Error("capabilities 必须是已知能力标识组成的数组");
+          }
+          state.pairing = { ...state.pairing, capabilities: [...new Set(capabilities)] };
+          savePairing(state.pairing);
+          return stateView(state);
+        },
       },
     };
   }

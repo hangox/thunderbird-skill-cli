@@ -73,7 +73,7 @@ const MAIL_ROUTE_READINESS: Readonly<Record<MailRouteId, MailRouteHandlerStatus>
 // browser.messages/browser.compose/...）实现业务逻辑的函数。本轮全部
 // "not-implemented"，因此这里必然是空对象；后续实现某条能力的 PR 同时把
 // MAIL_ROUTE_READINESS 对应项改成 "implemented" 并在这里补上函数引用，
-// handleMailRouteRequest 会据此路由，不需要改动分发逻辑本身。
+// handleOperation 会据此路由，不需要改动分发逻辑本身。
 type MailRouteBusinessHandler = (body: unknown, context: { capability: string }) => Promise<unknown>;
 const MAIL_ROUTE_BUSINESS_HANDLERS: Partial<Record<MailRouteId, MailRouteBusinessHandler>> = {};
 
@@ -125,31 +125,31 @@ function isMailRouteId(value: string): value is MailRouteId {
 }
 
 /**
- * api.js 通过 onMailRouteRequest 转发已认证/已过 capability 门禁的邮件 route
+ * api.js 通过 onOperation 转发已认证/已过 capability 门禁的邮件 route
  * 请求；这里是唯一允许调用标准 MailExtension API（browser.accounts/
  * browser.messages/browser.compose/...)的地方，api.js 本身不含任何邮件业务
  * 语义（禁止 XPCOM MailServices 调用）。本轮 MAIL_ROUTE_READINESS 全部
  * "not-implemented"，因此该函数目前对全部请求统一响应 E_NOT_IMPLEMENTED，
  * 但完整的转发/响应回路是真实可用的，供后续实现能力的 PR 直接复用。
  */
-async function handleMailRouteRequest(token: string, routeId: string, capability: string, bodyJson: string): Promise<void> {
+async function handleOperation(token: string, routeId: string, capability: string, bodyJson: string): Promise<void> {
   if (!isMailRouteId(routeId) || MAIL_ROUTE_READINESS[routeId] !== "implemented") {
-    await browser.thunderbirdSkillBridge.failMailRoute(token, "E_NOT_IMPLEMENTED", "该邮件能力尚未实现");
+    await browser.thunderbirdSkillBridge.failOperation(token, "E_NOT_IMPLEMENTED", "该邮件能力尚未实现");
     return;
   }
   const handler = MAIL_ROUTE_BUSINESS_HANDLERS[routeId];
   if (!handler) {
     // readiness 与 handler 登记表本身出现漂移：视为未实现失败关闭，不猜测执行。
     console.error(`Thunderbird Skill Bridge：route ${routeId} 标记为 implemented 但没有登记 handler`);
-    await browser.thunderbirdSkillBridge.failMailRoute(token, "E_NOT_IMPLEMENTED", "该邮件能力尚未实现");
+    await browser.thunderbirdSkillBridge.failOperation(token, "E_NOT_IMPLEMENTED", "该邮件能力尚未实现");
     return;
   }
   try {
     const body: unknown = JSON.parse(bodyJson);
     const result = await handler(body, { capability });
-    await browser.thunderbirdSkillBridge.respondMailRoute(token, JSON.stringify(result));
+    await browser.thunderbirdSkillBridge.respondToOperation(token, JSON.stringify(result));
   } catch (error) {
-    await browser.thunderbirdSkillBridge.failMailRoute(token, "E_INTERNAL", error instanceof Error ? error.message : "未知内部错误");
+    await browser.thunderbirdSkillBridge.failOperation(token, "E_INTERNAL", error instanceof Error ? error.message : "未知内部错误");
   }
 }
 
@@ -181,7 +181,7 @@ async function startBridge(): Promise<BridgeState> {
   try {
     const state = await browser.thunderbirdSkillBridge.start();
     console.info("Thunderbird Skill Bridge：Phase 1 回环服务已启动");
-    browser.thunderbirdSkillBridge.onMailRouteRequest.addListener(handleMailRouteRequest);
+    browser.thunderbirdSkillBridge.onOperation.addListener(handleOperation);
     void verifyMailRouteRegistry();
     return {
       mode: "phase-1",

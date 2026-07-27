@@ -15,22 +15,20 @@ export const MAIL_ROUTE_PREFIX = "/v1/mail/" as const;
 export type MailRouteMethod = "POST";
 
 // 范围裁决（team-lead，2026-07-27）：v0.3.0 不实现永久删除、长连接/轮询式
-// watch、calendar。本文件因此不冻结这三类能力的 route；对应能力标识
-// （曾计划中的 mail.delete-confirmed.v1 / mail.watch.v1）也不在此轮的
-// MailCapability 集合里出现，避免声明了却没有对应 route 可用的死契约。
+// watch、calendar。本文件因此不冻结这三类能力的 route，MailCapability 也
+// 不包含没有对应 route 的死能力标识（含曾计划中的
+// mail.delete-confirmed.v1 / mail.watch.v1 / calendar.read.v1）。
 export type MailCapability =
   | "mail.read.v1"
   | "mail.reversible.v1"
   | "draft.write.v1"
-  | "mail.send-confirmed.v1"
-  | "calendar.read.v1";
+  | "mail.send-confirmed.v1";
 
 export const MAIL_CAPABILITIES: readonly MailCapability[] = [
   "mail.read.v1",
   "mail.reversible.v1",
   "draft.write.v1",
   "mail.send-confirmed.v1",
-  "calendar.read.v1",
 ] as const;
 
 export interface MailRouteSpec {
@@ -107,10 +105,8 @@ export const MAIL_ROUTES: readonly MailRouteSpec[] = [
     risk: "reversible", capability: "mail.reversible.v1", maxRequestBodyBytes: 8 * KIB, maxResponseBodyBytes: 16 * KIB,
     summary: "移入废纸篓并返回 undo token",
   },
-  // message delete（永久删除）本轮不实现：不冻结 route，CLI 侧对应命令
-  // 保持 commands.ts 中的 phase: "future"，实际调用会在 CLI 层落到
-  // E_NOT_IMPLEMENTED（未来实现时仍必须是 prepare/confirm + Thunderbird UI
-  // 人工确认回执，不接受 force/yes 绕过——但那是后续独立评审的范围）。
+  // message delete（永久删除）本轮不冻结 route；commands.ts 中对应命令保持
+  // phase: "future"，落到既有 E_NOT_IMPLEMENTED 兜底。
   {
     id: "attachments.list", method: "POST", path: `${MAIL_ROUTE_PREFIX}attachments.list`, command: ["attachments", "list"],
     risk: "read", capability: "mail.read.v1", maxRequestBodyBytes: 1 * KIB, maxResponseBodyBytes: 32 * KIB,
@@ -151,8 +147,8 @@ export const MAIL_ROUTES: readonly MailRouteSpec[] = [
     risk: "read", capability: "mail.read.v1", maxRequestBodyBytes: 1 * KIB, maxResponseBodyBytes: 8 * KIB,
     summary: "查询 operationId 对应的异步/可撤销操作状态",
   },
-  // watch（bounded JSONL 事件流）本轮不实现：不冻结 route。commands.ts 中
-  // 对应命令保持 phase: "future"。
+  // watch（bounded JSONL 事件流）本轮不冻结 route；commands.ts 中对应命令
+  // 保持 phase: "future"。
 ] as const;
 
 export function findMailRoute(method: string, path: string): MailRouteSpec | undefined {

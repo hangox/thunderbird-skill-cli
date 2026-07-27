@@ -61,13 +61,19 @@ export interface ResolveContext {
 /** 单个 kind 允许持有的最大在途条目数；超过时先做一次过期清理，仍超限则拒绝签发新 ref，绝不静默驱逐仍有效的条目。 */
 const DEFAULT_MAX_ENTRIES_PER_KIND = 4_000;
 
-/** issue() 因配额耗尽而拒绝时抛出的显式类型错误，调用方可据此与"其他内部错误"区分并映射为稳定的 CLI 错误语义（而不是笼统的 500）。 */
+/** 跨全部 kind 合计的在途条目上限，独立于单 kind 上限，防止很多个 kind 各自不超限但合计仍占用过多内存（压力回收的第二道防线）。 */
+const DEFAULT_MAX_TOTAL_ENTRIES = 20_000;
+
+/** 单个 ref 允许的最长存活时间；即使调用方传入更大的 ttlMs 也会被拒绝，而不是静默接受一个长期存活、扩大暴露窗口的 ref。 */
+export const MAX_REF_TTL_MS = 30 * 60 * 1000;
+
+/** issue() 因配额耗尽而拒绝时抛出的显式类型错误，调用方可据此与"其他内部错误"区分并映射为稳定的 CLI 错误语义（而不是笼统的 500）。`kind: "*"` 表示命中的是跨 kind 的全局上限，而不是某个具体 kind 的上限。 */
 export class RefStoreCapacityError extends Error {
   constructor(
-    readonly kind: RefKind,
+    readonly kind: RefKind | "*",
     readonly limit: number,
   ) {
-    super(`ref kind ${kind} 已达到在途上限（${limit}），拒绝签发新 ref`);
+    super(kind === "*" ? `ref store 已达到全局在途上限（${limit}），拒绝签发新 ref` : `ref kind ${kind} 已达到在途上限（${limit}），拒绝签发新 ref`);
     this.name = "RefStoreCapacityError";
   }
 }
@@ -79,6 +85,7 @@ export class RefStore<T = unknown> {
   constructor(
     private readonly source: RandomTokenSource,
     private readonly maxEntriesPerKind: number = DEFAULT_MAX_ENTRIES_PER_KIND,
+    private readonly maxTotalEntries: number = DEFAULT_MAX_TOTAL_ENTRIES,
   ) {}
 
   get size(): number {
@@ -97,10 +104,15 @@ export class RefStore<T = unknown> {
     }
   }
 
-  /** @throws {RefStoreCapacityError} 该 kind 在途配额已耗尽（已先做过一次过期回收）。 */
+  /** @throws {RangeError} ttlMs 不是正有限数，或超过 MAX_REF_TTL_MS。 */
+  /** @throws {RefStoreCapacityError} 该 kind 或全局在途配额已耗尽（已先做过一次过期回收）。 */
   issue(kind: RefKind, clientId: string, pairingEpoch: string, payload: T, ttlMs: number): string {
     if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new RangeError("ttlMs 必须是正有限数");
+    if (ttlMs > MAX_REF_TTL_MS) throw new RangeError(`ttlMs 不得超过 MAX_REF_TTL_MS（${MAX_REF_TTL_MS}ms）`);
     this.prune();
+    if (this.entries.size >= this.maxTotalEntries) {
+      throw new RefStoreCapacityError("*", this.maxTotalEntries);
+    }
     const current = this.countByKind.get(kind) ?? 0;
     if (current >= this.maxEntriesPerKind) {
       throw new RefStoreCapacityError(kind, this.maxEntriesPerKind);

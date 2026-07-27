@@ -14,17 +14,15 @@ export const MAIL_ROUTE_PREFIX = "/v1/mail/" as const;
 // 2) bodySha256 对每个请求都有意义，不存在"GET 请求签名覆盖空 body"这种特例。
 export type MailRouteMethod = "POST";
 
-// mail.delete-confirmed.v1 / mail.watch.v1 是本轮新增的能力标识，随 status
-// capabilities 协商一起生效；两者目前都不会被配对流程自动授予（账号/能力授权
-// UI 是未来工作项），因此在该 UI 上线前，message.delete.* 与 watch.poll 会因
-// 未持有 capability 而在扩展侧统一 403 E_POLICY_DENIED 失败关闭。
+// 范围裁决（team-lead，2026-07-27）：v0.3.0 不实现永久删除、长连接/轮询式
+// watch、calendar。本文件因此不冻结这三类能力的 route；对应能力标识
+// （曾计划中的 mail.delete-confirmed.v1 / mail.watch.v1）也不在此轮的
+// MailCapability 集合里出现，避免声明了却没有对应 route 可用的死契约。
 export type MailCapability =
   | "mail.read.v1"
   | "mail.reversible.v1"
   | "draft.write.v1"
   | "mail.send-confirmed.v1"
-  | "mail.delete-confirmed.v1"
-  | "mail.watch.v1"
   | "calendar.read.v1";
 
 export const MAIL_CAPABILITIES: readonly MailCapability[] = [
@@ -32,8 +30,6 @@ export const MAIL_CAPABILITIES: readonly MailCapability[] = [
   "mail.reversible.v1",
   "draft.write.v1",
   "mail.send-confirmed.v1",
-  "mail.delete-confirmed.v1",
-  "mail.watch.v1",
   "calendar.read.v1",
 ] as const;
 
@@ -111,16 +107,10 @@ export const MAIL_ROUTES: readonly MailRouteSpec[] = [
     risk: "reversible", capability: "mail.reversible.v1", maxRequestBodyBytes: 8 * KIB, maxResponseBodyBytes: 16 * KIB,
     summary: "移入废纸篓并返回 undo token",
   },
-  {
-    id: "messages.delete.prepare", method: "POST", path: `${MAIL_ROUTE_PREFIX}messages.delete.prepare`, command: ["message", "delete"],
-    risk: "destructive", capability: "mail.delete-confirmed.v1", maxRequestBodyBytes: 4 * KIB, maxResponseBodyBytes: 16 * KIB,
-    summary: "生成永久删除预览，触发 Thunderbird UI 人工确认，返回短期 previewId",
-  },
-  {
-    id: "messages.delete.confirm", method: "POST", path: `${MAIL_ROUTE_PREFIX}messages.delete.confirm`, command: ["message", "delete"],
-    risk: "destructive", capability: "mail.delete-confirmed.v1", maxRequestBodyBytes: 2 * KIB, maxResponseBodyBytes: 8 * KIB,
-    summary: "提交已获 UI 人工确认回执的永久删除；无 force/yes 绕过",
-  },
+  // message delete（永久删除）本轮不实现：不冻结 route，CLI 侧对应命令
+  // 保持 commands.ts 中的 phase: "future"，实际调用会在 CLI 层落到
+  // E_NOT_IMPLEMENTED（未来实现时仍必须是 prepare/confirm + Thunderbird UI
+  // 人工确认回执，不接受 force/yes 绕过——但那是后续独立评审的范围）。
   {
     id: "attachments.list", method: "POST", path: `${MAIL_ROUTE_PREFIX}attachments.list`, command: ["attachments", "list"],
     risk: "read", capability: "mail.read.v1", maxRequestBodyBytes: 1 * KIB, maxResponseBodyBytes: 32 * KIB,
@@ -161,11 +151,8 @@ export const MAIL_ROUTES: readonly MailRouteSpec[] = [
     risk: "read", capability: "mail.read.v1", maxRequestBodyBytes: 1 * KIB, maxResponseBodyBytes: 8 * KIB,
     summary: "查询 operationId 对应的异步/可撤销操作状态",
   },
-  {
-    id: "watch.poll", method: "POST", path: `${MAIL_ROUTE_PREFIX}watch.poll`, command: ["watch"],
-    risk: "read", capability: "mail.watch.v1", maxRequestBodyBytes: 2 * KIB, maxResponseBodyBytes: 64 * KIB,
-    summary: "bounded watch 单次轮询；CLI 在 --duration 内循环调用并输出 JSONL，扩展不维持长连接",
-  },
+  // watch（bounded JSONL 事件流）本轮不实现：不冻结 route。commands.ts 中
+  // 对应命令保持 phase: "future"。
 ] as const;
 
 export function findMailRoute(method: string, path: string): MailRouteSpec | undefined {
@@ -175,19 +162,3 @@ export function findMailRoute(method: string, path: string): MailRouteSpec | und
 export function findMailRoutesByCommand(command: readonly string[]): readonly MailRouteSpec[] {
   return MAIL_ROUTES.filter((route) => route.command.length === command.length && route.command.every((part, index) => part === command[index]));
 }
-
-// ---------------------------------------------------------------------------
-// bounded watch 契约：CLI 是一次性进程，`watch` 命令在自己的进程生命周期内
-// 循环调用 watch.poll 并把结果转成 stdout 上的 JSONL 行；扩展侧永远只处理
-// 单次短请求，不维持任何长连接、不成为 server。
-// ---------------------------------------------------------------------------
-
-export const WATCH_MIN_DURATION_SECONDS = 10;
-export const WATCH_MAX_DURATION_SECONDS = 15 * 60;
-export const WATCH_MAX_EVENTS_PER_POLL = 50;
-export const WATCH_HEARTBEAT_INTERVAL_MS = 15_000;
-export const WATCH_MIN_POLL_INTERVAL_MS = 2_000;
-
-export type WatchEventType = "message.new" | "message.updated" | "message.removed" | "operation.completed";
-
-export const WATCH_EVENT_TYPES: readonly WatchEventType[] = ["message.new", "message.updated", "message.removed", "operation.completed"] as const;

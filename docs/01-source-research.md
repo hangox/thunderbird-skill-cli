@@ -118,7 +118,9 @@ flowchart LR
 
 ### 邮件 API 可行性结论（供 E2/E3/E4 参考，非本轮实现）
 
-Thunderbird 稳定 MailExtension API（`browser.accounts`、`browser.folders`、`browser.messages`（含 `query`/`get`/`update`/`move`/`delete`/`listAttachments`/`getAttachmentFile`）、`browser.compose`、`browser.identities`）覆盖本轮契约里绝大多数只读/可逆/草稿能力，理论上不需要在 `bridge/api.js` 里为它们各自新写 XPCOM 代码，只需要在 **非特权** MV3 background 侧调用这些 API 并通过特权桥转发结果；这与 `docs/04-extension-design.md` 权限表中“accountsRead/messagesRead/accountsFolders/messagesMove/compose”的既定权限分级一致。真正需要留在 Experiment/XPCOM 特权层的只有：loopback HTTP server 本身（已实现）、Ed25519 签名与 opaque ref 绑定表（本轮已实现，见 `extension/bridge/api.js` 新增的 `createRefStore`/`createUiConfirmationRegistry`）、以及永久删除的 UI 人工确认回执登记（本轮只冻结契约，未实现 UI）。这一结论未经真机验证，留给实现只读/可逆/草稿能力的后续 PR 在隔离 profile 中复核。
+Thunderbird 稳定 MailExtension API（`browser.accounts`、`browser.folders`、`browser.messages`（含 `query`/`get`/`update`/`move`/`listAttachments`/`getAttachmentFile`，**不含** `delete`——永久删除本轮范围裁决排除）、`browser.compose`、`browser.identities`）覆盖本轮契约里绝大多数只读/可逆/草稿能力，理论上不需要在 `bridge/api.js` 里为它们各自新写 XPCOM 代码，只需要在 **非特权** MV3 background 侧调用这些 API 并通过特权桥转发结果；这与 `docs/04-extension-design.md` 权限表中“accountsRead/messagesRead/accountsFolders/messagesMove/compose”的既定权限分级一致。真正需要留在 Experiment/XPCOM 特权层的只有：loopback HTTP server 本身（已实现）、Ed25519 签名与 opaque ref 绑定表（本轮已实现，见 `extension/bridge/api.js` 新增的 `createRefStore`）。这一结论未经真机验证，留给实现只读/可逆/草稿能力的后续 PR 在隔离 profile 中复核。
+
+**范围裁决（team-lead，2026-07-27）**：v0.3.0 不实现永久删除（`message delete`）、长连接/轮询式 `watch`、`calendar`。本轮已从 `src/contracts/routes.ts`、`extension/bridge/api.js`、`extension/src/background.ts` 的登记表中移除这三类的 route/handler 骨架，不申请 `messagesDelete` 或任何 calendar 相关权限；`message delete` 与 `watch` 在 `src/contracts/commands.ts` 中保持 `phase: "future"`，对应 CLI 命令继续落到既有的 `E_NOT_IMPLEMENTED` 兜底。永久删除若未来实现，仍必须是 prepare/confirm 两阶段并绑定 Thunderbird UI 人工确认回执，不接受 `--force`/`--yes`；这是独立评审范围，不在本轮内。
 
 ### 本轮结论
 

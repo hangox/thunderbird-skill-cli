@@ -511,14 +511,16 @@ function createLoopbackServer(preflight, dispatch) {
 }
 
 // ---------------------------------------------------------------------------
-// 邮件 route 通用管线：反原型污染的 body 守卫、opaque ref 绑定表、UI 人工确认
-// 回执登记表与静态 route registry。这是 extension/src/schema.ts、
-// extension/src/refs.ts、src/contracts/routes.ts 三份纯 TS 参考实现在
-// Experiment 特权作用域下的运行时镜像——这里无法 `import` 编译产物，只能像本
-// 文件既有的 canonical()/isEd25519Spki() 那样手动保持同步，由测试兜底一致性。
+// 邮件 route 通用管线：反原型污染的 body 守卫、opaque ref 绑定表与静态
+// route registry。这是 extension/src/schema.ts、extension/src/refs.ts、
+// src/contracts/routes.ts 三份纯 TS 参考实现在 Experiment 特权作用域下的
+// 运行时镜像——这里无法 `import` 编译产物，只能像本文件既有的
+// canonical()/isEd25519Spki() 那样手动保持同步，由测试兜底一致性。
 // 本轮只交付这套骨架与全部 stub handler（统一 501 E_NOT_IMPLEMENTED），不接
 // 线任何真实 mail adapter；后续实现只读/可逆/草稿-外发能力的 PR 只需要把
-// MAIL_ROUTE_HANDLERS 里对应条目换成真正的函数引用。
+// MAIL_ROUTE_HANDLERS 里对应条目换成真正的函数引用。范围裁决（team-lead，
+// 2026-07-27）：v0.3.0 不实现永久删除、watch、calendar，这里不冻结它们的
+// route，也不提供永久删除专用的 UI 人工确认回执登记表。
 // ---------------------------------------------------------------------------
 
 const MAIL_DANGEROUS_KEYS = new Set(["__proto__", "prototype", "constructor"]);
@@ -585,24 +587,10 @@ function createRefStore(maxEntriesPerKind = 4000) {
   };
 }
 
-// message delete 的 prepare/confirm 契约的执行侧原语：prepare 只产出 preview
-// （经 RefStore、kind="preview"），永远不直接产出可执行的 confirm。只有
-// Thunderbird UI 中的人工确认动作（不在本轮范围，由后续 UI 集成 PR 调用
-// grant()）登记回执后，confirm 阶段才能凭 previewId 换取一次性执行权限。
-// 没有回执时 confirm 恒为 E_CONFIRMATION_REQUIRED，不存在 force/yes 绕过参数。
-function createUiConfirmationRegistry() {
-  const receipts = new Map();
-  return {
-    grant(previewId, contentDigest, nowMs) { receipts.set(previewId, { previewId, grantedAt: nowMs, contentDigest }); },
-    takeReceipt(previewId) {
-      const receipt = receipts.get(previewId);
-      if (receipt) receipts.delete(previewId);
-      return receipt;
-    },
-    deny(previewId) { receipts.delete(previewId); },
-    clear() { receipts.clear(); },
-  };
-}
+// 范围裁决（team-lead，2026-07-27）：v0.3.0 不实现永久删除，因此这里不再
+// 提供 message delete prepare/confirm 专用的 UI 人工确认回执登记表；
+// draft send 的 prepare/confirm 外发确认走 RefStore 的 "confirm" kind
+// （revision/收件人/主题/附件 digest 绑定），不需要额外的 UI 回执原语。
 
 const MAIL_ROUTE_PREFIX = "/v1/mail/";
 
@@ -618,8 +606,7 @@ const MAIL_ROUTES = [
   { id: "messages.mark", path: `${MAIL_ROUTE_PREFIX}messages.mark`, capability: "mail.reversible.v1", maxRequestBodyBytes: 8192 },
   { id: "messages.move", path: `${MAIL_ROUTE_PREFIX}messages.move`, capability: "mail.reversible.v1", maxRequestBodyBytes: 8192 },
   { id: "messages.trash", path: `${MAIL_ROUTE_PREFIX}messages.trash`, capability: "mail.reversible.v1", maxRequestBodyBytes: 8192 },
-  { id: "messages.delete.prepare", path: `${MAIL_ROUTE_PREFIX}messages.delete.prepare`, capability: "mail.delete-confirmed.v1", maxRequestBodyBytes: 4096 },
-  { id: "messages.delete.confirm", path: `${MAIL_ROUTE_PREFIX}messages.delete.confirm`, capability: "mail.delete-confirmed.v1", maxRequestBodyBytes: 2048 },
+  // message delete（永久删除）本轮不实现，无对应 route（team-lead 范围裁决 2026-07-27）。
   { id: "attachments.list", path: `${MAIL_ROUTE_PREFIX}attachments.list`, capability: "mail.read.v1", maxRequestBodyBytes: 1024 },
   { id: "attachments.save", path: `${MAIL_ROUTE_PREFIX}attachments.save`, capability: "mail.reversible.v1", maxRequestBodyBytes: 4096 },
   { id: "drafts.create", path: `${MAIL_ROUTE_PREFIX}drafts.create`, capability: "draft.write.v1", maxRequestBodyBytes: 8192 },
@@ -628,7 +615,7 @@ const MAIL_ROUTES = [
   { id: "drafts.send.prepare", path: `${MAIL_ROUTE_PREFIX}drafts.send.prepare`, capability: "mail.send-confirmed.v1", maxRequestBodyBytes: 2048 },
   { id: "drafts.send.confirm", path: `${MAIL_ROUTE_PREFIX}drafts.send.confirm`, capability: "mail.send-confirmed.v1", maxRequestBodyBytes: 2048 },
   { id: "operations.get", path: `${MAIL_ROUTE_PREFIX}operations.get`, capability: "mail.read.v1", maxRequestBodyBytes: 1024 },
-  { id: "watch.poll", path: `${MAIL_ROUTE_PREFIX}watch.poll`, capability: "mail.watch.v1", maxRequestBodyBytes: 2048 },
+  // watch（bounded JSONL 事件流）本轮不实现，无对应 route（team-lead 范围裁决 2026-07-27）。
 ];
 
 function findMailRoute(method, path) {
@@ -683,7 +670,6 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
       receipts: new Map(),
       nonces: new Map(),
       refStore: createRefStore(),
-      uiConfirmations: createUiConfirmationRegistry(),
       error: null,
       startPromise: null,
       expiryTimer: null,
@@ -700,7 +686,6 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
       state.server = null;
       state.sessionToken = null;
       state.refStore.clear();
-      state.uiConfirmations.clear();
       removeDescriptor(state.instanceId);
       state.descriptorPath = null;
       state.error = reason ?? state.error;
@@ -1015,10 +1000,9 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
           // 这样即使在中途崩溃，重启后 epoch 也只会更大，绝不会让旧签名重新生效。
           state.pairingEpoch += 1n;
           savePairingEpoch(state.pairingEpoch);
-          // 撤销的 client 持有的全部 opaque ref 与在途 UI 确认回执必须随之失效，
-          // 否则旧 client 的 ref 会在重新配对的新 client 名下被错误复用。
+          // 撤销的 client 持有的全部 opaque ref 必须随之失效，否则旧 client 的
+          // ref 会在重新配对的新 client 名下被错误复用。
           if (state.pairing) state.refStore.revokeAllForClient(state.pairing.clientId);
-          state.uiConfirmations.clear();
           clearPairing();
           state.pairing = null;
           state.pending = null;

@@ -8,6 +8,10 @@
 // 能力）要遵守的稳定接口形状，并把"哪些 route 尚未接线"列成一张类型检查过的
 // 登记表，供集成阶段核对覆盖率——把某个 route 的值从 "not-implemented" 换成
 // 真正的 handler 函数引用，就是接入该能力的唯一步骤，不需要改动其他任何地方。
+//
+// 范围裁决（team-lead，2026-07-27）：v0.3.0 不实现永久删除与 watch，因此
+// 这里不登记 messages.delete.prepare/confirm、watch.poll——它们在
+// src/contracts/routes.ts 里也没有对应 route。
 // ---------------------------------------------------------------------------
 
 // 注：background.js 以 classic script（非 module）形式被 manifest 直接加载，
@@ -28,8 +32,6 @@ const MAIL_ROUTE_IDS = [
   "messages.mark",
   "messages.move",
   "messages.trash",
-  "messages.delete.prepare",
-  "messages.delete.confirm",
   "attachments.list",
   "attachments.save",
   "drafts.create",
@@ -38,7 +40,6 @@ const MAIL_ROUTE_IDS = [
   "drafts.send.prepare",
   "drafts.send.confirm",
   "operations.get",
-  "watch.poll",
 ] as const;
 
 type MailRouteId = (typeof MAIL_ROUTE_IDS)[number];
@@ -57,8 +58,6 @@ const MAIL_ROUTE_READINESS: Readonly<Record<MailRouteId, MailRouteHandlerStatus>
   "messages.mark": "not-implemented",
   "messages.move": "not-implemented",
   "messages.trash": "not-implemented",
-  "messages.delete.prepare": "not-implemented",
-  "messages.delete.confirm": "not-implemented",
   "attachments.list": "not-implemented",
   "attachments.save": "not-implemented",
   "drafts.create": "not-implemented",
@@ -67,7 +66,6 @@ const MAIL_ROUTE_READINESS: Readonly<Record<MailRouteId, MailRouteHandlerStatus>
   "drafts.send.prepare": "not-implemented",
   "drafts.send.confirm": "not-implemented",
   "operations.get": "not-implemented",
-  "watch.poll": "not-implemented",
 };
 
 interface ThunderbirdSkillBridgeState {

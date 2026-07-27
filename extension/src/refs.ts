@@ -14,6 +14,10 @@
 //
 // extension/bridge/api.js 中维护一份运行在 Experiment 特权作用域下的等价实现
 // （用 webCrypto.getRandomValues 代替 Node crypto），两者靠测试保持同步。
+//
+// 范围裁决（team-lead，2026-07-27）：v0.3.0 不实现永久删除，因此不含破坏性
+// 操作 prepare 阶段专用的 "preview" ref kind 与 UI 人工确认回执登记表；
+// "confirm" kind 仍保留给 draft send 的 prepare/confirm 两阶段外发确认用。
 
 export type RefKind =
   | "acc" // account
@@ -24,11 +28,10 @@ export type RefKind =
   | "attachment"
   | "op" // operation id
   | "undo"
-  | "preview" // 破坏性操作 prepare 阶段的预览 id（进入 UI 人工确认前）
-  | "confirm" // 已获 UI 人工确认回执、可提交执行的确认 id
+  | "confirm" // draft send 的 prepare/confirm 外发确认 id
   | "cursor";
 
-export const REF_KINDS: readonly RefKind[] = ["acc", "folder", "msg", "draft", "identity", "attachment", "op", "undo", "preview", "confirm", "cursor"] as const;
+export const REF_KINDS: readonly RefKind[] = ["acc", "folder", "msg", "draft", "identity", "attachment", "op", "undo", "confirm", "cursor"] as const;
 
 export function refPattern(kind: RefKind): RegExp {
   return new RegExp(`^${kind}_[A-Za-z0-9_-]{16,128}$`);
@@ -126,45 +129,5 @@ export class RefStore<T = unknown> {
     this.entries.delete(token);
     const current = this.countByKind.get(entry.kind) ?? 0;
     if (current > 0) this.countByKind.set(entry.kind, current - 1);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 破坏性操作（当前仅 message delete）的 UI 人工确认回执登记表。
-//
-// prepare 只生成 preview（进入 RefStore，kind="preview"），不产出可执行的
-// confirm。只有当 Thunderbird UI 中的人工确认动作（不属于本轮范围，由后续
-// UI 集成 PR 实现）调用 grant() 登记回执后，confirm 阶段才能凭 previewId
-// 换取一次性 confirm ref 并放行执行。没有对应回执时 confirm 永远
-// E_CONFIRMATION_REQUIRED，不存在 force/yes 之类的绕过参数。
-// ---------------------------------------------------------------------------
-
-export interface UiConfirmationReceipt {
-  readonly previewId: string;
-  readonly grantedAt: number;
-  /** 人工确认时 Thunderbird UI 展示的内容摘要哈希；execute 阶段必须与当前状态重新计算的摘要一致，否则视为内容已变化。 */
-  readonly contentDigest: string;
-}
-
-export class UiConfirmationRegistry {
-  private readonly receipts = new Map<string, UiConfirmationReceipt>();
-
-  grant(previewId: string, contentDigest: string, nowMs: number): void {
-    this.receipts.set(previewId, { previewId, grantedAt: nowMs, contentDigest });
-  }
-
-  /** 取出并立即失效（一次性）；调用方仍需自行比对 contentDigest 与过期窗口。 */
-  takeReceipt(previewId: string): UiConfirmationReceipt | undefined {
-    const receipt = this.receipts.get(previewId);
-    if (receipt) this.receipts.delete(previewId);
-    return receipt;
-  }
-
-  deny(previewId: string): void {
-    this.receipts.delete(previewId);
-  }
-
-  clear(): void {
-    this.receipts.clear();
   }
 }

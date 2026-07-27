@@ -100,6 +100,14 @@ events`（日历）三项**不在本轮交付范围内**，不接受任何参数
 }
 ```
 
+`error.details` 是可选字段，只在少数场景出现——目前唯一定义的是 `operationId`（`draft send --confirm` 真实发送失败即 `E_INTERNAL` 时携带，格式为 `op_...`）：
+
+```json
+{"error": {"code": "E_INTERNAL", "message": "外发失败：请通过 operations get 查询最新状态，不要自动重试", "retryable": false, "details": {"operationId": "op_..."}}}
+```
+
+程序化查询必须直接读取 `error.details.operationId`，不要从 `message` 文案里解析——文案措辞不构成稳定协议，可能随时调整。
+
 ## 错误处理
 
 | 错误 | 处理 |
@@ -115,6 +123,7 @@ events`（日历）三项**不在本轮交付范围内**，不接受任何参数
 | `E_POLICY_DENIED` | 说明账号/能力未授权，不绕过 |
 | `E_TIMEOUT` | 只读可重试；写操作先查询状态 |
 | `E_PAIRING_CHANGED` | 配对代已变更（通常刚撤销过配对）；重新运行命令，不要自动重试写操作 |
+| `draft send --confirm` 返回 `E_INTERNAL` | 读取 `error.details.operationId`，调用 `operations get OPERATION_ID` 确认最终是否已发送；不要凭空重试 `--confirm`（confirmationId 已一次性消费） |
 
 ## 退出码
 

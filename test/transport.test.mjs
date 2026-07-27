@@ -23,7 +23,7 @@ function descriptor(port, overrides = {}) {
     pid: process.pid,
     port,
     sessionToken: "d".repeat(64),
-    extensionVersion: "0.2.1",
+    extensionVersion: "0.3.0",
     pairingEpoch: "0",
     startedAt: "2026-07-25T00:00:00.000Z",
     expiresAt: "2099-07-25T01:00:00.000Z",
@@ -34,9 +34,9 @@ function descriptor(port, overrides = {}) {
 function status(overrides = {}) {
   return {
     protocolVersion: 1,
-    minCliVersion: "0.2.1",
-    maxCliVersion: "0.2.1",
-    extensionVersion: "0.2.1",
+    minCliVersion: "0.3.0",
+    maxCliVersion: "0.3.0",
+    extensionVersion: "0.3.0",
     instanceId: "inst_transport1",
     profileId: `sha256:${"c".repeat(64)}`,
     capabilities: [],
@@ -53,7 +53,7 @@ test("status 仅调用数值回环且发送安全头", async (t) => {
     assert.equal(request.headers.authorization, `Bearer ${"d".repeat(64)}`);
     assert.equal(request.headers["x-thunderbird-protocol"], "1");
     assert.equal(request.headers["x-thunderbird-pairing-epoch"], "0");
-    assert.equal(request.headers["x-thunderbird-client-version"], "0.2.1");
+    assert.equal(request.headers["x-thunderbird-client-version"], "0.3.0");
     assert.match(request.headers["x-request-nonce"], /^[a-f0-9]{32}$/);
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify(status()));

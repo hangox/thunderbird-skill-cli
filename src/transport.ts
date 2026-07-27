@@ -5,7 +5,7 @@ import { ERROR_CODES, type ErrorCode, type MailErrorDetails } from "./contracts/
 import { PUBLIC_KEY_ALGORITHM, signRequest, type PairingIdentity, type SigningIdentity } from "./auth.js";
 import { MAIL_CAPABILITIES, type MailRouteSpec } from "./contracts/routes.js";
 
-export const CLI_VERSION = "0.2.1";
+export const CLI_VERSION = "0.3.0";
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const CAPABILITIES = new Set<string>(MAIL_CAPABILITIES);
 

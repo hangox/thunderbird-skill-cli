@@ -30,6 +30,11 @@
       "xpiSha256": "1718052a4fd0c9db75e36ee4a727c2ad57bc9a4e43b57375a0b9cadeda928cf0",
       "reviewedOn": "2026-07-26",
       "note": "相对 0.2.0 的唯一变更是版本字符串：api.js 的 EXTENSION_VERSION/CLI_VERSION、protocol.ts 的 CLI_VERSION、extension/manifest.json 的 version，均由 0.2.0 改为 0.2.1。已复核安全不变量全部未变：protocolVersion=1、descriptorVersion=2、PUBLIC_KEY_ALGORITHM=Ed25519、Ed25519 SPKI 前缀 302a300506032b6570032100、pairingEpoch 严格模式。两次确定性打包逐字节一致。"
+    },
+    "0.3.0": {
+      "xpiSha256": "a97d0b235e804044f137205e31b84d6952248abcde06b3cfca33dec4277fff6a",
+      "reviewedOn": "2026-07-28",
+      "note": "相对 0.2.1 的实质性变更：新增只读/可逆/草稿-外发邮件能力（Task #27-#43）。人工审查如下——(1) manifest.json permissions 由空扩展为 accountsRead/messagesRead/messagesUpdate/messagesMove/compose/compose.save 六项，无 messagesDelete、无日历相关权限、host_permissions 仍为空（不请求任何网络主机访问）；(2) XPI 内容仅 7 个文件（dist/protocol.js、dist/background.js、dist/options.js、bridge/schema.json、bridge/api.js、manifest.json、options.html），未见测试/源码/多余文件混入；(3) 对 dist/background.js 与 bridge/api.js 做了 messagesDelete/mailservices/jsonrpc/tools-list/tools-call/serve---stdio/calendar 关键词人工复扫，仅命中解释性注释（明确说明'不实现'），未发现任何真实调用点，与 test/non-mcp.test.mjs、test/extension.test.mjs 的自动化扫描结论一致；(4) 邮件 route 权限模型（mail.read.v1/mail.reversible.v1/draft.write.v1/mail.send-confirmed.v1）默认全部未授权（fail-closed），需在 options 页面显式勾选，外发能力单独 UI 强调并默认关闭；compose.send 权限本身未申请，是'当前无法真实发送'的物理保证；(5) 既有安全不变量未变：protocolVersion=1、descriptorVersion=2、PUBLIC_KEY_ALGORITHM=Ed25519、Ed25519 SPKI 前缀 302a300506032b6570032100、pairingEpoch 严格模式、loopback-only 绑定、反原型污染 body 校验。两次独立干净重建（rm -rf dist 后重新 build+package）逐字节一致，SHA-256 相同。UI confirm（配对确认页、options capability 授权页）的真实 GUI 链路仍是环境未验证项，不在本次人工评审范围内。"
     }
   }
 }

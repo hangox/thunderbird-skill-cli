@@ -13,10 +13,10 @@
       "source": {
         "source": "npm",
         "package": "@hangox/thunderbird-skill-cli",
-        "version": "0.2.1"
+        "version": "0.3.0"
       },
       "description": "按需加载的 Thunderbird Skill：通过一次性本地 CLI 访问专用 Thunderbird 扩展，不注册常驻 MCP server。（独立第三方工具，与 Mozilla Foundation 无隶属关系）",
-      "version": "0.2.1",
+      "version": "0.3.0",
       "author": {
         "name": "hangox",
         "url": "https://github.com/hangox"

@@ -185,7 +185,7 @@ export function buildRequest(harness, options = {}) {
     ["content-type", options.contentType ?? "application/json"],
     ["x-thunderbird-client", "thunderbird-skill-cli"],
     ["x-thunderbird-protocol", options.protocol ?? "1"],
-    ["x-thunderbird-client-version", options.clientVersion ?? "0.2.1"],
+    ["x-thunderbird-client-version", options.clientVersion ?? "0.3.0"],
     ["x-request-id", requestId],
     ["x-request-timestamp", timestamp],
     ["x-request-nonce", nonce],

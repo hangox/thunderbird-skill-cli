@@ -110,6 +110,8 @@ thunderbird [--json|--human] [--instance ID|--profile ID] [--timeout MS] <comman
 
 扩展再次读取草稿并比对 revision 与摘要。草稿在预览后发生任何变化，确认立即失效。禁止 `--yes`、`--force`、`skipReview` 绕过。
 
+真实发送在 Thunderbird 侧失败时（`E_INTERNAL`），错误 `message` 只是人类可读文案，不包含可解析的 operation id；程序化查询最新状态必须读取结构化的 `error.details.operationId`（见下方 stdout JSON schema），再调用 `operations get OPERATION_ID` 确认是否已发送成功——`details` 是一个封闭 allowlist，目前唯一合法字段就是 `operationId`，任何其他字段（token/nonce/路径/正文等）都不会出现在这里。
+
 ## stdout JSON schema
 
 成功：
@@ -141,17 +143,35 @@ thunderbird [--json|--human] [--instance ID|--profile ID] [--timeout MS] <comman
   "error": {
     "code": "E_NOT_PAIRED",
     "message": "Thunderbird 扩展尚未与此 CLI 配对",
-    "retryable": false,
-    "details": {"action": "run-setup"}
+    "retryable": false
   }
 }
 ```
+
+`error.details` 是可选的结构化补充信息，只在少数具体场景出现——目前唯一定义的字段是 `operationId`（`draft send --confirm` 真实发送失败即 `E_INTERNAL` 时携带），供调用方直接程序化查询 `operations get`，不需要解析 `message` 文案：
+
+```json
+{
+  "schemaVersion": "1.0",
+  "ok": false,
+  "command": "draft send",
+  "requestId": "cli_...",
+  "error": {
+    "code": "E_INTERNAL",
+    "message": "外发失败：请通过 operations get 查询最新状态，不要自动重试",
+    "retryable": false,
+    "details": {"operationId": "op_..."}
+  }
+}
+```
+
+`details` 是一个封闭 allowlist（不是任意 `Record<string, unknown>`）：目前只放行 `operationId` 一个字段，扩展侧、CLI 传输层各自独立校验格式（必须是合法的 opaque ref），未知/非法字段一律静默丢弃，不会出现在最终 stdout 里。
 
 规则：
 
 - JSON 模式 stdout 恰好输出一个 UTF-8 JSON 文档和换行。
 - 警告仍放 `meta.warnings`；诊断和进度只写 stderr。
-- 不在错误中返回 token、descriptor 路径、正文、完整收件人或账号地址。
+- 不在错误中返回 token、descriptor 路径、正文、完整收件人或账号地址；`details` 同样受此约束——它是一个封闭 allowlist，不是自由文本或任意对象。
 - cursor 是不透明、短期、绑定 query 与 instance 的值。
 - `requestId` 可用于本机审计关联，但不包含 PID、邮箱或路径。
 

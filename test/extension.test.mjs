@@ -225,7 +225,7 @@ test("配对 UI 将确认绑定到最后展示的 intent 和挑战码", async ()
 });
 
 test("发布/运行版本四源完全一致，且 schemaVersion 不被卷入产品版本", async () => {
-  const RELEASE_VERSION = "0.2.1";
+  const RELEASE_VERSION = "0.3.0";
   const [packageJson, manifest, apiSource] = await Promise.all([
     readFile(new URL("../package.json", import.meta.url), "utf8").then(JSON.parse),
     readFile(new URL("../extension/manifest.json", import.meta.url), "utf8").then(JSON.parse),

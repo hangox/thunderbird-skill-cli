@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Thunderbird Skill Bridge",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "为本机 thunderbird CLI 提供回环服务、配对与只读/可逆/草稿邮件能力；不申请永久删除或日历权限，外发权限（compose.send）留待外发专项评审后的集成阶段单独加入",
   "browser_specific_settings": {
     "gecko": {

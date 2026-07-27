@@ -1,8 +1,8 @@
 {
   "name": "thunderbird-skill-cli",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
-  "description": "面向 Claude Code Skill 的 Thunderbird 原生本地 CLI 与专用扩展 Phase 1 compatibility spike",
+  "description": "面向 Claude Code Skill 的 Thunderbird 原生本地 CLI 与专用扩展：只读/可逆/草稿-外发邮件能力（不含永久删除、watch、日历）",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
@@ -29,7 +29,7 @@
     "build:plugin": "npm run build && npm run package:extension && node scripts/build-plugin.ts",
     "validate:plugin": "claude plugin validate ./build/plugin && claude plugin validate .",
     "audit:package": "node scripts/audit-package.ts",
-    "pack:dry-run": "npm pack --dry-run --prefix build/plugin",
+    "pack:dry-run": "cd build/plugin && npm pack --dry-run",
     "release:check": "npm run check && npm test && npm run build:plugin && npm run audit:package"
   },
   "engines": {

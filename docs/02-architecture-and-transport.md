@@ -75,7 +75,7 @@ Authorization: Bearer <session-token>
 Content-Type: application/json
 X-Thunderbird-Client: thunderbird-skill-cli
 X-Thunderbird-Protocol: 1
-X-Thunderbird-Client-Version: 0.2.0
+X-Thunderbird-Client-Version: 0.3.0
 X-Thunderbird-Pairing-Epoch: <strict-decimal-epoch>
 X-Request-Id: <uuid>
 X-Request-Timestamp: <unix-ms>
@@ -108,7 +108,7 @@ X-Request-Nonce: <random-128-bit>
   "pid": 12345,
   "port": 49152,
   "sessionToken": "64-hex-characters",
-  "extensionVersion": "0.2.0",
+  "extensionVersion": "0.3.0",
   "pairingEpoch": "0",
   "startedAt": "2026-07-24T12:00:00Z",
   "expiresAt": "2026-07-24T20:00:00Z"

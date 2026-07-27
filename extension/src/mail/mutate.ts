@@ -123,7 +123,7 @@ export async function messagesMark(body: unknown, context: MailAdapterContext): 
     for (const nativeId of nativeIds) await browser.messages.update(nativeId, changes);
 
     const { operationId, undo } = issueUndoAndRecord("mark", "messages.mark", items, parsed.messageRefs, context);
-    recordAudit({ routeId: "messages.mark", capability: context.capability, clientId: context.clientId, outcome: "success", detail: `affected=${parsed.messageRefs.length}` });
+    recordAudit({ routeId: "messages.mark", capability: context.capability, clientId: context.clientId, outcome: "success", affectedCount: parsed.messageRefs.length });
     return { operationId, affected: parsed.messageRefs, undo };
   });
 }
@@ -166,7 +166,7 @@ export async function messagesMove(body: unknown, context: MailAdapterContext): 
     await browser.messages.move(nativeIds, targetFolder);
 
     const { operationId, undo } = issueUndoAndRecord("move", "messages.move", items, parsed.messageRefs, context);
-    recordAudit({ routeId: "messages.move", capability: context.capability, clientId: context.clientId, outcome: "success", detail: `affected=${parsed.messageRefs.length}` });
+    recordAudit({ routeId: "messages.move", capability: context.capability, clientId: context.clientId, outcome: "success", affectedCount: parsed.messageRefs.length });
     return { operationId, affected: parsed.messageRefs, undo };
   });
 }
@@ -229,7 +229,7 @@ export async function messagesTrash(body: unknown, context: MailAdapterContext):
     }
 
     const { operationId, undo } = issueUndoAndRecord("trash", "messages.trash", items, parsed.messageRefs, context);
-    recordAudit({ routeId: "messages.trash", capability: context.capability, clientId: context.clientId, outcome: "success", detail: `affected=${parsed.messageRefs.length}` });
+    recordAudit({ routeId: "messages.trash", capability: context.capability, clientId: context.clientId, outcome: "success", affectedCount: parsed.messageRefs.length });
     return { operationId, affected: parsed.messageRefs, undo };
   });
 }

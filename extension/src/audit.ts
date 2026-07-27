@@ -12,15 +12,49 @@
 // clientId 本身不是凭据（不是 token/nonce），但仍按 docs/07 的"keyed hash"
 // 原则处理，避免原始 clientId 大量出现在日志里（例如被日志聚合工具索引后
 // 用于跨会话关联同一用户的行为模式）。
+//
+// 结构化 allowlist（Task #42 收敛，2026-07-27）：此前 `detail` 是自由文本
+// `string`，脱敏完全依赖调用方自律——TypeScript 类型系统挡不住任何人在
+// 某次改动里手滑传入 `detail: subject` 或 `detail: JSON.stringify(body)`。
+// 现在把"能记录什么"收窄成一张固定 allowlist：一个封闭的 reason 枚举 +
+// 若干个数字/布尔字段，`recordAudit` 内部逐字段手工拷贝并做运行时类型
+// 校验，不接受也不透传 allowlist 之外的任何属性——即使调用方是绕过
+// TypeScript 的普通 JS（或者未来某次改动手滑在调用处多塞了一个字段），
+// 运行时也不会把它序列化进日志，这是比"类型层禁止"更强的保证。
 export type AuditOutcome = "success" | "denied" | "error";
+
+/**
+ * 封闭的 reason 枚举：只允许这些固定字符串，不接受任何调用方自定义文本。
+ * 新增一种"原因"必须在这里显式加一个新枚举值，而不是随手传一个新字符串。
+ */
+export type AuditReason =
+  | "too-large"
+  | "too-large-actual"
+  | "reused-tab"
+  | "reopened-from-template"
+  | "confirm-not-found"
+  | "revision-mismatch"
+  | "tab-closed"
+  | "live-digest-mismatch"
+  | "send-failed";
+
+const AUDIT_REASONS: ReadonlySet<string> = new Set<AuditReason>([
+  "too-large", "too-large-actual", "reused-tab", "reopened-from-template",
+  "confirm-not-found", "revision-mismatch", "tab-closed", "live-digest-mismatch", "send-failed",
+]);
 
 export interface AuditEvent {
   readonly routeId: string;
   readonly capability: string;
   readonly clientId: string;
   readonly outcome: AuditOutcome;
-  /** 极简、非敏感的补充信息（例如 "affected=3"、错误码），不得包含正文/主题/地址/路径。 */
-  readonly detail?: string;
+  /** 封闭枚举，不是自由文本。 */
+  readonly reason?: AuditReason;
+  readonly affectedCount?: number;
+  readonly restoredCount?: number;
+  readonly sizeBytes?: number;
+  readonly offsetBytes?: number;
+  readonly done?: boolean;
 }
 
 /** 非密码学用途的 keyed hash：只需要"不可逆展示原文、同一输入稳定映射到同一摘要"，不需要抗碰撞强度（clientId 不是需要防伪造的秘密）。 */
@@ -33,16 +67,35 @@ function hashClientId(clientId: string): string {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
-/** 记录一条脱敏审计事件；每个 mutate/drafts/send/attachments-write/undo/operations handler 在成功、策略拒绝、内部错误三类结果上各调用一次。 */
+/** 非负安全整数：拒绝 NaN/Infinity/负数/非整数，这类畸形值直接丢弃该字段而不是让它以奇怪形式进日志。 */
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * 记录一条脱敏审计事件；每个 mutate/drafts/send/attachments-write/undo/
+ * operations handler 在成功、策略拒绝、内部错误三类结果上各调用一次。
+ *
+ * 手工逐字段拷贝、运行时校验类型——即使 `event` 在运行时实际携带了
+ * allowlist 之外的任意属性（例如某处调用被篡改/手滑传入了 `subject`/
+ * `path`/`token`/`nonce`），这里也绝不会把它们读出来、更不会写进日志：
+ * 这不是"忘了脱敏"，而是这个函数的实现根本不存在读取任意属性的代码路径。
+ */
 export function recordAudit(event: AuditEvent): void {
-  const line = {
+  const line: Record<string, unknown> = {
     ts: new Date().toISOString(),
-    route: event.routeId,
-    capability: event.capability,
-    client: `client#${hashClientId(event.clientId)}`,
-    outcome: event.outcome,
-    ...(event.detail ? { detail: event.detail } : {}),
+    route: typeof event.routeId === "string" ? event.routeId : "",
+    capability: typeof event.capability === "string" ? event.capability : "",
+    client: `client#${hashClientId(typeof event.clientId === "string" ? event.clientId : "")}`,
+    outcome: event.outcome === "success" || event.outcome === "denied" || event.outcome === "error" ? event.outcome : "error",
   };
-  if (event.outcome === "error") console.error("[thunderbird-skill-bridge][audit]", JSON.stringify(line));
+  if (typeof event.reason === "string" && AUDIT_REASONS.has(event.reason)) line.reason = event.reason;
+  if (isNonNegativeSafeInteger(event.affectedCount)) line.affectedCount = event.affectedCount;
+  if (isNonNegativeSafeInteger(event.restoredCount)) line.restoredCount = event.restoredCount;
+  if (isNonNegativeSafeInteger(event.sizeBytes)) line.sizeBytes = event.sizeBytes;
+  if (isNonNegativeSafeInteger(event.offsetBytes)) line.offsetBytes = event.offsetBytes;
+  if (typeof event.done === "boolean") line.done = event.done;
+
+  if (line.outcome === "error") console.error("[thunderbird-skill-bridge][audit]", JSON.stringify(line));
   else console.info("[thunderbird-skill-bridge][audit]", JSON.stringify(line));
 }

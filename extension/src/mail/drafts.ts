@@ -204,7 +204,7 @@ export async function draftsOpen(body: unknown, context: MailAdapterContext): Pr
     const composeTabId = payload.composeTabId!;
     const details = await browser.compose.getComposeDetails(composeTabId);
     const draftRef = issueRef("draft", context, payload);
-    recordAudit({ routeId: "drafts.open", capability: context.capability, clientId: context.clientId, outcome: "success", detail: "reused-tab" });
+    recordAudit({ routeId: "drafts.open", capability: context.capability, clientId: context.clientId, outcome: "success", reason: "reused-tab" });
     return draftResponse(draftRef, composeDetailsToFields(details), payload.messageNativeId, composeTabId);
   }
 
@@ -217,6 +217,6 @@ export async function draftsOpen(body: unknown, context: MailAdapterContext): Pr
   const tab = await browser.compose.beginNew(payload.messageNativeId);
   const details = await browser.compose.getComposeDetails(tab.id);
   const draftRef = issueRef("draft", context, { messageNativeId: payload.messageNativeId, composeTabId: tab.id } satisfies DraftRefPayload);
-  recordAudit({ routeId: "drafts.open", capability: context.capability, clientId: context.clientId, outcome: "success", detail: "reopened-from-template" });
+  recordAudit({ routeId: "drafts.open", capability: context.capability, clientId: context.clientId, outcome: "success", reason: "reopened-from-template" });
   return draftResponse(draftRef, composeDetailsToFields(details), payload.messageNativeId, tab.id);
 }

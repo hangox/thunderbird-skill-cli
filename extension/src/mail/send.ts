@@ -144,22 +144,22 @@ export async function draftsSendConfirm(body: unknown, context: MailAdapterConte
   if (payload) mailRefStore.consume(parsed.confirmationId);
 
   if (!payload || payload.draftRef !== parsed.draftRef) {
-    recordAudit({ routeId: "drafts.send.confirm", capability: context.capability, clientId: context.clientId, outcome: "denied", detail: "confirm-not-found" });
+    recordAudit({ routeId: "drafts.send.confirm", capability: context.capability, clientId: context.clientId, outcome: "denied", reason: "confirm-not-found" });
     throw new MailAdapterError("E_CONFIRMATION_REQUIRED", "外发确认不存在或已失效，请重新执行 draft send --prepare");
   }
   if (payload.revision !== parsed.draftRevision) {
-    recordAudit({ routeId: "drafts.send.confirm", capability: context.capability, clientId: context.clientId, outcome: "denied", detail: "revision-mismatch" });
+    recordAudit({ routeId: "drafts.send.confirm", capability: context.capability, clientId: context.clientId, outcome: "denied", reason: "revision-mismatch" });
     throw new MailAdapterError("E_CONFIRMATION_REQUIRED", "草稿自 prepare 后已变化，请重新执行 draft send --prepare");
   }
   if (!(await isTabAlive(payload.composeTabId))) {
-    recordAudit({ routeId: "drafts.send.confirm", capability: context.capability, clientId: context.clientId, outcome: "denied", detail: "tab-closed" });
+    recordAudit({ routeId: "drafts.send.confirm", capability: context.capability, clientId: context.clientId, outcome: "denied", reason: "tab-closed" });
     throw new MailAdapterError("E_CONFIRMATION_REQUIRED", "撰写窗口在确认前已关闭，请重新执行 draft open 与 draft send --prepare");
   }
 
   const details = await browser.compose.getComposeDetails(payload.composeTabId);
   const liveDigests = await computeDigests(details);
   if (liveDigests.revision !== payload.revision || liveDigests.recipientDigest !== payload.recipientDigest || liveDigests.subjectDigest !== payload.subjectDigest || liveDigests.attachmentDigest !== payload.attachmentDigest) {
-    recordAudit({ routeId: "drafts.send.confirm", capability: context.capability, clientId: context.clientId, outcome: "denied", detail: "live-digest-mismatch" });
+    recordAudit({ routeId: "drafts.send.confirm", capability: context.capability, clientId: context.clientId, outcome: "denied", reason: "live-digest-mismatch" });
     throw new MailAdapterError("E_CONFIRMATION_REQUIRED", "草稿在确认前又发生了变化，请重新执行 draft send --prepare");
   }
 
@@ -168,7 +168,7 @@ export async function draftsSendConfirm(body: unknown, context: MailAdapterConte
     await browser.compose.sendMessage(payload.composeTabId, { mode: "sendNow" });
   } catch (error) {
     recordOperation(operationId, "drafts.send", [parsed.draftRef], context, "failed");
-    recordAudit({ routeId: "drafts.send.confirm", capability: context.capability, clientId: context.clientId, outcome: "error", detail: "send-failed" });
+    recordAudit({ routeId: "drafts.send.confirm", capability: context.capability, clientId: context.clientId, outcome: "error", reason: "send-failed" });
     // Task #42 收敛：错误消息必须真的带上 operationId，否则"请通过 operations
     // get 查询最新状态"这句提示没有任何东西可查——MailAdapterError 目前只有
     // code/message 两个字段（没有结构化 details 透传通道，那需要改

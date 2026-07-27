@@ -109,7 +109,7 @@ export async function attachmentsSave(body: unknown, context: MailAdapterContext
   if (!attachment) throw new MailAdapterError("E_NOT_FOUND", "对象不存在，或不属于当前实例/配对范围");
 
   if (attachment.size > ATTACHMENT_FETCH_MAX_TOTAL_BYTES) {
-    recordAudit({ routeId: "attachments.save", capability: context.capability, clientId: context.clientId, outcome: "denied", detail: "too-large" });
+    recordAudit({ routeId: "attachments.save", capability: context.capability, clientId: context.clientId, outcome: "denied", reason: "too-large" });
     throw new MailAdapterError("E_POLICY_DENIED", `附件大小超过单次可拉取上限（${ATTACHMENT_FETCH_MAX_TOTAL_BYTES} 字节），拒绝签发 fetch token`);
   }
 
@@ -117,7 +117,7 @@ export async function attachmentsSave(body: unknown, context: MailAdapterContext
   const buffer = new Uint8Array(await file.arrayBuffer());
   if (buffer.byteLength > ATTACHMENT_FETCH_MAX_TOTAL_BYTES) {
     // 防御性二次校验：listAttachments 声明的 size 与实际读到的字节数可能不一致（没有官方保证一致，见 docs/09 §A.5）。
-    recordAudit({ routeId: "attachments.save", capability: context.capability, clientId: context.clientId, outcome: "denied", detail: "too-large-actual" });
+    recordAudit({ routeId: "attachments.save", capability: context.capability, clientId: context.clientId, outcome: "denied", reason: "too-large-actual" });
     throw new MailAdapterError("E_POLICY_DENIED", `附件实际字节数超过单次可拉取上限（${ATTACHMENT_FETCH_MAX_TOTAL_BYTES} 字节），拒绝签发 fetch token`);
   }
   const digest = await sha256Hex(buffer);
@@ -132,7 +132,7 @@ export async function attachmentsSave(body: unknown, context: MailAdapterContext
   bufferedByToken.set(fetchToken, { bytes: buffer, name, contentType, nextExpectedOffset: 0 });
   outstandingTokenByAttachment.set(key, fetchToken);
 
-  recordAudit({ routeId: "attachments.save", capability: context.capability, clientId: context.clientId, outcome: "success", detail: `size=${buffer.byteLength}` });
+  recordAudit({ routeId: "attachments.save", capability: context.capability, clientId: context.clientId, outcome: "success", sizeBytes: buffer.byteLength });
   return {
     attachmentRef: parsed.attachmentRef,
     name,
@@ -198,7 +198,7 @@ export async function attachmentsFetch(body: unknown, context: MailAdapterContex
     buffered.nextExpectedOffset = nextOffset;
   }
 
-  recordAudit({ routeId: "attachments.fetch", capability: context.capability, clientId: context.clientId, outcome: "success", detail: `offset=${expectedOffset} done=${done}` });
+  recordAudit({ routeId: "attachments.fetch", capability: context.capability, clientId: context.clientId, outcome: "success", offsetBytes: expectedOffset, done });
 
   const out: Record<string, unknown> = {
     name: buffered.name,

@@ -57,6 +57,6 @@ export async function operationsUndo(body: unknown, context: MailAdapterContext)
   }
 
   markOperationUndone(payload.operationId);
-  recordAudit({ routeId: "operations.undo", capability: context.capability, clientId: context.clientId, outcome: "success", detail: `restored=${payload.items.length}` });
+  recordAudit({ routeId: "operations.undo", capability: context.capability, clientId: context.clientId, outcome: "success", restoredCount: payload.items.length });
   return { undone: true, operationId: payload.operationId, restored: payload.items.length };
 }

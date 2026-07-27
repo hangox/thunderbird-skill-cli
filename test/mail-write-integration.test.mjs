@@ -892,6 +892,13 @@ test("audit 日志：mark 成功事件不含 token/正文/完整邮箱地址，c
     assert.doesNotMatch(line, /@example\.com/, "审计日志不得包含完整邮箱地址");
   }
   assert.ok(auditLines.some((line) => /client#[0-9a-f]{8}/.test(line)), "client 应以固定格式的 keyed hash 出现，而不是原始 id 或完全缺席");
+
+  // Task #42：detail 自由文本已被移除，改为封闭 allowlist——这里正面验证
+  // messages.mark 真实产出的是结构化 affectedCount 数值字段，而不是任何
+  // 形式的自由文本 detail。
+  const markAuditLine = JSON.parse(ctx.consoleInfos.filter((args) => String(args[0]).includes("[audit]") && String(args[1]).includes('"route":"messages.mark"'))[0][1]);
+  assert.equal(markAuditLine.affectedCount, 1);
+  assert.equal("detail" in markAuditLine, false, "audit 事件不应再存在自由文本 detail 字段");
 });
 
 test("audit 日志：draft send 全流程（含真实主题/收件人）不泄漏完整主题或收件人地址", async () => {
@@ -917,7 +924,65 @@ test("audit 日志：draft send 全流程（含真实主题/收件人）不泄�
     assert.doesNotMatch(line, new RegExp(secretRecipient), "审计日志不得包含完整收件人地址明文");
     assert.doesNotMatch(line, /正文机密内容/, "审计日志不得包含正文明文");
     assert.doesNotMatch(line, new RegExp(prepared.result.confirmationId), "审计日志不得包含 confirmationId 明文");
+    assert.doesNotMatch(line, /"detail"/, "Task #42 之后 audit 事件不应再出现自由文本 detail 字段");
   }
+});
+
+test("audit 日志：attachments save/fetch 真实产出结构化 sizeBytes/offsetBytes/done，不以字符串拼接形式出现", async () => {
+  const bundle = await getBundle();
+  const ctx = await loadBundleInSandbox(bundle);
+  const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);
+  const attachmentRef = await setupAttachment(ctx, call, 700 * 1024); // 跨越单块上限，产生两个 chunk
+
+  ctx.consoleInfos.length = 0;
+  const saved = await call("attachments.save", { attachmentRef });
+  assert.equal(saved.ok, true, JSON.stringify(saved));
+  const first = await call("attachments.fetch", { fetchToken: saved.result.fetchToken });
+  assert.equal(first.result.done, false);
+  const second = await call("attachments.fetch", { fetchToken: saved.result.fetchToken, cursor: first.result.nextCursor });
+  assert.equal(second.result.done, true);
+
+  const auditCalls = ctx.consoleInfos.filter((args) => String(args[0]).includes("[audit]"));
+  const saveLine = auditCalls.map((c) => JSON.parse(c[1])).find((l) => l.route === "attachments.save");
+  const fetchLines = auditCalls.map((c) => JSON.parse(c[1])).filter((l) => l.route === "attachments.fetch");
+
+  assert.ok(saveLine, "attachments.save 必须产生审计日志");
+  assert.equal(saveLine.sizeBytes, 700 * 1024, "sizeBytes 必须是真实附件字节数的数值字段，不是拼接字符串");
+  assert.equal("detail" in saveLine, false);
+
+  assert.equal(fetchLines.length, 2, "两次 fetch 各自产生一条审计日志");
+  assert.equal(fetchLines[0].offsetBytes, 0);
+  assert.equal(fetchLines[0].done, false);
+  assert.equal(typeof fetchLines[0].done, "boolean", "done 必须是真正的 boolean，不是字符串 \"false\"");
+  assert.equal(fetchLines[1].done, true);
+  assert.ok(fetchLines[1].offsetBytes > 0);
+  for (const line of [saveLine, ...fetchLines]) assert.equal("detail" in line, false);
+});
+
+test("audit 日志：messages.move 产生 affectedCount，operations.undo 产生 restoredCount，均为数值字段（不是字符串拼接）", async () => {
+  const bundle = await getBundle();
+  const ctx = await loadBundleInSandbox(bundle);
+  const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);
+  ctx.browserWrite.addMessage({});
+  ctx.browserWrite.addMessage({});
+  const foldersRes = await call("folders.list", {});
+  const archiveRef = foldersRes.result.folders.find((f) => f.name === "Archive").folderRef;
+  const searchRes = await call("messages.search", {});
+  const refs = searchRes.result.messages.map((m) => m.messageRef);
+
+  ctx.consoleInfos.length = 0;
+  const moved = await call("messages.move", { messageRefs: refs, targetFolderRef: archiveRef });
+  assert.equal(moved.ok, true, JSON.stringify(moved));
+  const undone = await call("operations.undo", { undoToken: moved.result.undo.token });
+  assert.equal(undone.ok, true, JSON.stringify(undone));
+
+  const auditLines = ctx.consoleInfos.filter((args) => String(args[0]).includes("[audit]")).map((args) => JSON.parse(args[1]));
+  const moveLine = auditLines.find((l) => l.route === "messages.move");
+  const undoLine = auditLines.find((l) => l.route === "operations.undo");
+  assert.equal(moveLine.affectedCount, 2);
+  assert.equal(undoLine.restoredCount, 2);
+  assert.equal("detail" in moveLine, false);
+  assert.equal("detail" in undoLine, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -1010,7 +1075,14 @@ test("draft send：仅 identity 变化独立触发 revision 不符，收件人/�
   // 变了——证明 identityId 确实被纳入 revision 摘要输入。
 });
 
-test("audit 不泄漏 nonce/本机路径：这两类字段不在任何 E3 route 的 schema 内，携带它们的请求在 schema 层即被拒绝，从未产生任何审计事件", async () => {
+// Task #42 收敛：下面这条测试只证明 schema 层挡住了畸形请求（请求根本没
+// 走到 handler，更没走到 recordAudit()），对"audit sink 本身是否会把任意
+// 属性原样吐出去"这件事是空洞的——sink 在这条测试里从未被真正调用过一次。
+// 那部分真正的证明（绕过所有上游校验，直接向 recordAudit() 强塞
+// detail/nonce/path/subject/body/address/token 等 canary）在
+// test/audit.test.mjs 里独立覆盖。这里保留是因为"扩展不接收也不校验任何
+// 本机文件系统路径"这条契约本身仍然值得在真实 bundle 上跑一次端到端验证。
+test("schema 层拒绝携带 nonce/本机路径的畸形请求（不构成 audit sink 本身不泄漏的证明，见 test/audit.test.mjs）", async () => {
   const bundle = await getBundle();
   const ctx = await loadBundleInSandbox(bundle);
   const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);

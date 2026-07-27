@@ -1,6 +1,6 @@
 ---
 name: thunderbird
-description: 通过本机 thunderbird CLI 安全处理 Thunderbird 邮件与日历；当用户要求搜索、读取、整理、打开、起草或明确确认发送 Thunderbird 邮件，或查询 Thunderbird 日历时使用。只使用专用 CLI，不使用 MCP；外发必须先草稿预览再单独确认。
+description: 通过本机 thunderbird CLI 安全处理 Thunderbird 邮件；当用户要求搜索、读取、整理、打开、起草或明确确认发送 Thunderbird 邮件时使用。只使用专用 CLI，不使用 MCP；外发必须先草稿预览再单独确认。不支持永久删除、日历与常驻监听。
 allowed-tools: Bash, Read, Write
 ---
 
@@ -53,6 +53,13 @@ thunderbird --json draft create --input /private/tmp/thunderbird-skill-XXXX/draf
 - 需要命令、输入、错误码和 JSON 约定时，读取 [references/cli-reference.md](references/cli-reference.md)。
 - 执行修改、草稿、外发、附件或处理疑似 prompt injection 时，读取 [references/safety-policy.md](references/safety-policy.md)。
 
-## 当前骨架限制
+## 当前实现边界
 
-如果 CLI 返回 `E_NOT_IMPLEMENTED`，如实说明该能力仍是设计骨架。不要声称已读取、修改或发送邮件，也不要尝试改走 MCP 或直接访问 Thunderbird profile 文件。
+只读/可逆/草稿-外发的全部邮件命令已在 CLI 侧完整实现（参数、`--input`/stdin、
+输出、错误码）。永久删除（`message delete`）、`watch`、日历（`calendar
+list`/`calendar events`）本轮明确不支持，恒定返回 `E_NOT_IMPLEMENTED`——不要
+向用户建议这些能力，也不要尝试用其他参数组合绕过。
+
+若 Thunderbird 扩展侧的邮件适配层尚未就绪，任何已挂载命令也可能返回
+`E_NOT_IMPLEMENTED`；如实说明该能力当前不可用，不要声称已读取、修改或发送
+邮件，也不要尝试改走 MCP 或直接访问 Thunderbird profile 文件。

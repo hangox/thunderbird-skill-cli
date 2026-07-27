@@ -10,16 +10,18 @@ thunderbird [--json|--human] [--instance ID|--profile ID] <command> [args]
 
 ## 命令
 
+全部命令都需要 `--client CLIENT_ID`（配对时确定的身份）；下表按用途分组。
+
 | 命令 | 用途 | 风险 |
 |---|---|---|
 | `doctor` | 诊断扩展、配对、版本、发现与授权 | 只读 |
 | `setup` | 首次配对或重新配对 | 可逆 |
 | `status` | 当前实例、协议与能力状态 | 只读 |
-| `accounts list` | 授权账号与发件 identity | 只读 |
-| `folders list` | 账号文件夹 | 只读 |
-| `search --input FILE\|-` | 搜索邮件摘要 | 只读 |
-| `recent` | 近期邮件摘要 | 只读 |
-| `message get REF` | 按引用读取正文 | 只读 |
+| `accounts list [--include-identities]` | 授权账号与（可选）发件 identity | 只读 |
+| `folders list [--account REF] [--parent REF]` | 账号文件夹 | 只读 |
+| `search [--input FILE\|-] [--limit N] [--cursor C]` | 搜索邮件摘要 | 只读 |
+| `recent [--account REF] [--folder REF] [--limit N]` | 近期邮件摘要 | 只读 |
+| `message get REF [--format text\|markdown\|raw] [--max-bytes N]` | 按引用读取正文 | 只读 |
 | `message open REF` | 在 Thunderbird 打开邮件 | 只读/UI |
 | `message mark --input FILE\|-` | 修改已读、星标或标签 | 可逆 |
 | `message move --input FILE\|-` | 移动并返回 undo | 可逆 |
@@ -31,10 +33,20 @@ thunderbird [--json|--human] [--instance ID|--profile ID] <command> [args]
 | `draft send REF --confirm FILE\|-` | 提交具体、一次性发送确认 | 外发 |
 | `attachments list REF` | 列出附件元数据 | 只读 |
 | `attachments save --input FILE\|-` | 保存到显式目录，默认不覆盖 | 可逆 |
-| `calendar list` | 日历列表 | 只读 |
-| `calendar events --input FILE\|-` | 查询事件 | 只读 |
+| `operations get REF` | 查询可逆/外发操作的当前状态（如 undo/发送确认） | 只读 |
 
-当前阶段命令可能返回 `E_NOT_IMPLEMENTED`。
+引用参数（`REF`）一律是扩展签发的 opaque ref（`msg_...`/`draft_...`/`acc_...`/
+`folder_...`/`op_...`），不是数据库主键；`REF` 失效时应重新查询而不是重试。
+
+## 本轮明确不支持
+
+`message delete`（永久删除）、`watch`（事件流）、`calendar list`/`calendar
+events`（日历）三项**不在本轮交付范围内**，不接受任何参数，调用会恒定返回
+`E_NOT_IMPLEMENTED`。不要向用户建议这些能力，也不要尝试用其他参数或路径达到
+同等效果。
+
+其余命令若在真实 Thunderbird 环境中也返回 `E_NOT_IMPLEMENTED`，说明扩展侧的
+邮件适配层尚未就绪；如实告知用户该能力当前不可用。
 
 ## JSON envelope
 
@@ -76,7 +88,7 @@ thunderbird [--json|--human] [--instance ID|--profile ID] <command> [args]
 | 错误 | 处理 |
 |---|---|
 | `E_USAGE` / `E_VALIDATION` | 修正本地输入，不猜测缺失敏感字段 |
-| `E_NOT_IMPLEMENTED` | 说明仍为骨架，停止 |
+| `E_NOT_IMPLEMENTED` | 该能力本轮未纳入，或扩展侧邮件适配层尚未就绪；如实说明并停止 |
 | `E_NOT_PAIRED` | 指引用户在 Thunderbird UI 配对，不索要邮箱密码 |
 | `E_THUNDERBIRD_OFFLINE` | 请用户启动/检查 Thunderbird |
 | `E_AMBIGUOUS_INSTANCE` | 展示脱敏候选并让用户选择 |

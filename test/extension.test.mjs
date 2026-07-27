@@ -18,9 +18,16 @@ test("扩展 background 产物是 classic script 且失败路径不启用邮件�
   assert.match(source, /void startBridge\(\)/);
 });
 
-test("扩展 manifest 在 Phase 1 不申请邮件权限且只声明专用 Experiment API", async () => {
+test("扩展 manifest 0.3.0 权限收敛到只读/可逆/草稿，不申请永久删除、外发或日历权限", async () => {
   const manifest = JSON.parse(await readFile(new URL("../extension/manifest.json", import.meta.url), "utf8"));
-  assert.deepEqual(manifest.permissions, []);
+  // 权限最小化按 docs 附录 A.1 的官方核验收紧：accountsRead 已覆盖只读文件夹枚举，
+  // 无需 accountsFolders；compose/compose.save 支持草稿，但 compose.send（外发）
+  // 明确留到外发专项安全评审通过后的集成阶段才加入。
+  assert.deepEqual(new Set(manifest.permissions), new Set(["accountsRead", "messagesRead", "messagesUpdate", "messagesMove", "compose", "compose.save"]));
+  assert.equal(manifest.permissions.includes("accountsFolders"), false, "只读文件夹枚举已被 accountsRead 覆盖，不应重复申请 accountsFolders");
+  assert.equal(manifest.permissions.includes("messagesDelete"), false, "永久删除本轮不实现，绝不申请 messagesDelete（物理保证）");
+  assert.equal(manifest.permissions.includes("compose.send"), false, "外发能力默认关闭，compose.send 留待外发专项评审后的集成阶段加入");
+  assert.equal(manifest.permissions.some((permission) => /calendar/i.test(permission)), false, "calendar 本轮完全不纳入，不申请任何日历权限");
   assert.deepEqual(manifest.host_permissions, []);
   assert.deepEqual(Object.keys(manifest.experiment_apis), ["thunderbirdSkillBridge"]);
   assert.equal(manifest.experiment_apis.thunderbirdSkillBridge.parent.script, "bridge/api.js");

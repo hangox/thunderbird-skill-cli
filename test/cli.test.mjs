@@ -53,17 +53,20 @@ async function liveFixture(t) {
   return root;
 }
 
-test("help 展示命令且声明当前不访问邮件", () => {
+test("help 展示命令且声明 delete/watch/calendar 本轮未实现", () => {
   const output = execFileSync(process.execPath, [cli.pathname, "--help"], { encoding: "utf8" });
   assert.match(output, /draft create/);
-  assert.match(output, /不访问邮件/);
+  assert.match(output, /message delete/);
+  assert.match(output, /E_NOT_IMPLEMENTED/);
 });
 
-test("未进入 Phase 1 的命令继续返回稳定未实现错误", () => {
-  const result = spawnSync(process.execPath, [cli.pathname, "--json", "accounts", "list"], { encoding: "utf8" });
-  assert.equal(result.status, 3);
-  const envelope = JSON.parse(result.stdout);
-  assert.equal(envelope.error.code, "E_NOT_IMPLEMENTED");
+test("message delete/watch/calendar 本轮未纳入交付范围，继续返回稳定未实现错误", () => {
+  for (const args of [["message", "delete"], ["watch"], ["calendar", "list"], ["calendar", "events"]]) {
+    const result = spawnSync(process.execPath, [cli.pathname, "--json", ...args], { encoding: "utf8" });
+    assert.equal(result.status, 3, args.join(" "));
+    const envelope = JSON.parse(result.stdout);
+    assert.equal(envelope.error.code, "E_NOT_IMPLEMENTED", args.join(" "));
+  }
 });
 
 test("status 和 doctor 可通过真实 loopback mock 握手", async (t) => {

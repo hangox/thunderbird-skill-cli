@@ -235,6 +235,20 @@ undo token 只能恢复该操作，短期有效、一次性使用，并绑定 in
 
 未来 `watch` 是唯一允许 JSONL 的命令，必须显式声明 `--jsonl`，默认最长 15 分钟并有心跳与事件类型 allowlist。它不是 server 模式，也不接受 stdin RPC。
 
-## 当前骨架边界
+## 当前实现边界（0.3.0）
 
-现有 CLI 已实现 Phase 1 compatibility spike 的全局安全参数解析、descriptor 发现、`status` 与 `doctor` 回环握手；其余命令仍返回 `E_NOT_IMPLEMENTED`。配对、附件和邮箱功能尚未实现，真实扩展监听也未在隔离 Thunderbird profile 中验证。
+CLI 外壳（全局/命令级参数解析、`--input`/stdin 输入、envelope 输出、实例发现与
+client 身份加载）与全部只读/可逆/草稿-外发邮件命令（`accounts list`、`folders
+list`、`search`、`recent`、`message get/open/mark/move/trash`、`draft
+create/update/open/send`、`attachments list/save`、`operations get`）已按本文件
+与 `src/contracts/routes.ts` 冻结的 route 表完整挂载：CLI 会正确构造签名请求并
+发往 Thunderbird 扩展。
+
+`message delete`（永久删除）、`watch`、`calendar list/events` 三项本轮明确不
+纳入交付范围：不冻结对应 route、不接受任何参数，恒定返回 `E_NOT_IMPLEMENTED`。
+
+邮件数据的实际读写依赖 Thunderbird 扩展侧的邮件适配层（`extension/src/mail/*`，
+只读能力与可逆/草稿-外发能力分别由后续独立任务实现）；适配层接线完成前，已
+挂载命令在真实 Thunderbird 中调用时会从扩展侧收到 `E_NOT_IMPLEMENTED`（501 stub），
+这是扩展侧的状态，不是 CLI 侧的限制。`setup`/`status`/`doctor`/`xpi` 与配对/
+发现/握手底座保持不变。

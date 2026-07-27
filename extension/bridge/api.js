@@ -724,8 +724,9 @@ function stateView(state) {
     pairingState: state.pairingState,
     pairingEpoch: String(state.pairingEpoch),
     clientId: state.pairing?.clientId ?? null,
-    // options 页面用它渲染/预填已授予的 capability 复选框；生产环境在账号/
-    // 能力授权 UI 落地前恒为空集（confirmPairing 写入的默认值）。
+    // options 页面用它渲染/预填已授予的 capability 复选框；未配对，或配对后
+    // 从未在 options 页面保存过能力授权表单时，恒为 confirmPairing 写入的
+    // 空集（默认值）。
     capabilities: state.pairing?.capabilities ?? [],
     pendingIntentId: state.pending?.intentId ?? null,
     pendingCode: state.pending?.code ?? null,
@@ -1071,8 +1072,9 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
         confirmPairing: async (intentId, code) => {
           if (!state.pending || state.pending.intentId !== intentId || !constantTimeEqual(state.pending.code, code) || Date.parse(state.pending.expiresAt) <= Date.now()) throw new Error("配对确认无效或已过期");
           const confirmed = state.pending;
-          // capabilities 默认空集：账号/能力授权 UI 是未来工作项，未上线前一律
-          // 不自动授予任何邮件 capability，全部邮件 route 因此失败关闭。
+          // capabilities 默认空集：配对本身不自动授予任何邮件 capability，
+          // 必须在 extension/options.html 的能力授权表单里显式勾选并保存
+          // （调用 setMailCapabilities）才会生效，此前全部邮件 route 失败关闭。
           state.pairing = { clientId: confirmed.clientId, publicKeyAlgorithm: confirmed.publicKeyAlgorithm, publicKeySpkiBase64: confirmed.publicKeySpkiBase64, capabilities: [], createdAt: new Date().toISOString() };
           savePairing(state.pairing);
           state.receipts.set(confirmed.intentId, {
@@ -1125,10 +1127,10 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
         // 配对撤销（等价于 epoch 推进）时触发，background 收到后必须清空
         // 其持有的 mailRefStore；参见 revokePairing 里的 fire() 调用。
         onPairingRevoked: state.pairingRevokedEvent.event,
-        // 账号/能力授权 UI（Task #30/mail-write）写入已配对 client capabilities
-        // 的唯一入口；E1 只提供该入口本身，不实现调用它的 UI。覆盖式写入
-        // （不是增量 add），生产环境在该 UI 存在并调用它之前，capabilities
-        // 恒为 confirmPairing 写入的空集，全部邮件 route 因此保持失败关闭。
+        // 写入已配对 client capabilities 的唯一入口；extension/options.html
+        // 的能力授权表单（extension/src/options.ts）调用它。覆盖式写入
+        // （不是增量 add），未勾选/未保存过时 capabilities 恒为
+        // confirmPairing 写入的空集，全部邮件 route 因此保持失败关闭。
         setMailCapabilities: async (capabilities) => {
           if (!state.pairing) throw new Error("未配对，无法设置 capabilities");
           if (!Array.isArray(capabilities) || !capabilities.every((value) => typeof value === "string" && KNOWN_MAIL_CAPABILITIES.has(value))) {

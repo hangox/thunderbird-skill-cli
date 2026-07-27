@@ -1,9 +1,10 @@
 import type { RiskClass } from "./commands.js";
 
-// 邮件 route 的单一权威来源：CLI（未来 src/commands/*）、扩展 protocol 层
-// （extension/src/protocol.ts）与 Experiment 特权桥（extension/bridge/api.js）
-// 三方都必须从这里读取 method/path/risk/capability/body 上限，禁止在各层
-// 重新声明或推断这些静态元数据。变更此文件属于跨模块契约变更。
+// 邮件 route 的单一权威来源：CLI（src/cli.ts 的 MAIL_MOUNTS 声明式挂载表）、
+// 扩展 protocol 层（extension/src/protocol.ts）与 Experiment 特权桥
+// （extension/bridge/api.js）三方都必须从这里读取
+// method/path/risk/capability/body 上限，禁止在各层重新声明或推断这些静态
+// 元数据。变更此文件属于跨模块契约变更。
 
 export const MAIL_ROUTE_PREFIX = "/v1/mail/" as const;
 
@@ -57,6 +58,27 @@ export interface MailRouteSpec {
 }
 
 const KIB = 1024;
+
+// ---------------------------------------------------------------------------
+// attachments.save / attachments.fetch 的冻结契约常量（平台层：route/schema/
+// 上限本身；token/cursor 的签发与校验业务逻辑留给实现该 route 的 PR，见
+// attachments.fetch 的 summary）。
+//
+// 选型依据（team-lead 采纳的裁决）：JSON 内联 base64 分块比新增一条原始二进制
+// HTTP 响应分支更安全——复用现有 writeJson/parseJsonResponse 与全部既有的
+// Content-Type/校验管线，不需要在 loopback server 里单独维护一套二进制帧
+// 协议；代价是 base64 的 ~4/3 编码膨胀，已经体现在下面 attachments.fetch 的
+// maxResponseBodyBytes 里。
+// ---------------------------------------------------------------------------
+
+/** 单个附件允许拉取的原始字节总和上限；attachments.save 阶段发现超限直接拒绝签发 fetch token，不进入分块拉取。 */
+export const ATTACHMENT_FETCH_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
+
+/** attachments.fetch 单次响应里 base64 编码后的 chunk 长度上限（不是原始字节数）。 */
+export const ATTACHMENT_FETCH_MAX_CHUNK_ENCODED_BYTES = 512 * KIB;
+
+/** fetch token 的存活上限；一次性使用，client+epoch 绑定，重新签发新 token 会作废同一 attachmentRef 下的旧 token。 */
+export const ATTACHMENT_FETCH_TOKEN_TTL_MS = 2 * 60 * 1000;
 
 export const MAIL_ROUTES: readonly MailRouteSpec[] = [
   {
@@ -114,12 +136,18 @@ export const MAIL_ROUTES: readonly MailRouteSpec[] = [
   {
     id: "attachments.save", method: "POST", path: `${MAIL_ROUTE_PREFIX}attachments.save`, command: ["attachments", "save"],
     risk: "reversible", capability: "mail.reversible.v1", maxRequestBodyBytes: 4 * KIB, maxResponseBodyBytes: 8 * KIB,
-    summary: "校验目标路径（no-clobber/敏感路径/符号链接拒绝）并签发短期 attachment fetch token，不在本请求内联附件字节",
+    summary: `按 attachmentRef 授权并返回元数据 + 一次性 fetch token；扩展不接收也不校验任何本机文件系统路径——` +
+      `no-clobber/敏感路径/符号链接拒绝与实际落盘完全由 CLI（Task #36）负责。原始附件总大小超过 ` +
+      `ATTACHMENT_FETCH_MAX_TOTAL_BYTES（${ATTACHMENT_FETCH_MAX_TOTAL_BYTES} 字节）时本 route 直接拒绝，不签发 token。`,
   },
   {
     id: "attachments.fetch", method: "POST", path: `${MAIL_ROUTE_PREFIX}attachments.fetch`, command: ["attachments", "save"],
-    risk: "reversible", capability: "mail.reversible.v1", maxRequestBodyBytes: 1 * KIB, maxResponseBodyBytes: 512 * KIB,
-    summary: "凭 attachments.save 签发的 fetch token 分块拉取附件字节（base64，单块受限，cursor 续取），CLI 侧落盘",
+    risk: "reversible", capability: "mail.reversible.v1", maxRequestBodyBytes: 1 * KIB,
+    maxResponseBodyBytes: ATTACHMENT_FETCH_MAX_CHUNK_ENCODED_BYTES + 8 * KIB,
+    summary: `凭 attachments.save 签发的 fetch token 分块拉取附件字节；响应是 JSON 内联 base64（不是原始二进制流、不新增 HTTP 分支），` +
+      `单块 base64 编码后长度受 ATTACHMENT_FETCH_MAX_CHUNK_ENCODED_BYTES（${ATTACHMENT_FETCH_MAX_CHUNK_ENCODED_BYTES} 字节）硬限，` +
+      `用不透明 cursor 严格单调续取，乱序/重放 cursor 拒绝。token 存活上限 ATTACHMENT_FETCH_TOKEN_TTL_MS（${ATTACHMENT_FETCH_TOKEN_TTL_MS}ms）、` +
+      `一次性使用、client+epoch 绑定、重新签发作废旧 token；具体签发/校验实现留给落地该 route 的 PR，本文件只冻结这些契约常量。`,
   },
   {
     id: "drafts.create", method: "POST", path: `${MAIL_ROUTE_PREFIX}drafts.create`, command: ["draft", "create"],
@@ -152,7 +180,7 @@ export const MAIL_ROUTES: readonly MailRouteSpec[] = [
     summary: "查询 operationId 对应的异步/可撤销操作状态",
   },
   {
-    id: "operations.undo", method: "POST", path: `${MAIL_ROUTE_PREFIX}operations.undo`, command: ["undo"],
+    id: "operations.undo", method: "POST", path: `${MAIL_ROUTE_PREFIX}operations.undo`, command: ["operations", "undo"],
     risk: "reversible", capability: "mail.reversible.v1", maxRequestBodyBytes: 1 * KIB, maxResponseBodyBytes: 8 * KIB,
     summary: "凭可逆操作返回的一次性 undo token 撤销该操作（跨 client/过期/重放均失败）",
   },

@@ -261,8 +261,9 @@ export async function fetchPairingIntent(descriptor: InstanceDescriptor, timeout
 }
 
 // ---------------------------------------------------------------------------
-// 全部邮件 route 的通用低层调用原语，供后续实现只读/可逆/草稿-外发能力的
-// CLI 命令模块（src/commands/*）复用，不必各自重新实现签名/错误映射。
+// 全部邮件 route 的通用低层调用原语；src/cli.ts 的 MAIL_MOUNTS 声明式挂载表
+// 复用它做 command → route 的统一分派，不必每条邮件命令各自重新实现签名/
+// 错误映射。
 //
 // 与 fetchStatus/beginPairing/fetchPairingIntent 各自的窄错误映射（throwForStatus/
 // parseConflictCode）刻意保持独立：那两者的错误码集合是为 /v1/status 与

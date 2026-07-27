@@ -68,6 +68,15 @@ const MAIL_ROUTE_READINESS: Readonly<Record<MailRouteId, MailRouteHandlerStatus>
   "operations.get": "not-implemented",
 };
 
+// 真正的业务 handler 登记表：key 与 MAIL_ROUTE_READINESS 一一对应，值为
+// `undefined`（尚未接线）或一个用标准 MailExtension API（browser.accounts/
+// browser.messages/browser.compose/...）实现业务逻辑的函数。本轮全部
+// "not-implemented"，因此这里必然是空对象；后续实现某条能力的 PR 同时把
+// MAIL_ROUTE_READINESS 对应项改成 "implemented" 并在这里补上函数引用，
+// handleMailRouteRequest 会据此路由，不需要改动分发逻辑本身。
+type MailRouteBusinessHandler = (body: unknown, context: { capability: string }) => Promise<unknown>;
+const MAIL_ROUTE_BUSINESS_HANDLERS: Partial<Record<MailRouteId, MailRouteBusinessHandler>> = {};
+
 interface ThunderbirdSkillBridgeState {
   serviceStarted: boolean;
   port: number | null;
@@ -111,10 +120,69 @@ const fallbackState: BridgeState = {
   error: "Experiment API 启动失败",
 };
 
+function isMailRouteId(value: string): value is MailRouteId {
+  return (MAIL_ROUTE_IDS as readonly string[]).includes(value);
+}
+
+/**
+ * api.js 通过 onMailRouteRequest 转发已认证/已过 capability 门禁的邮件 route
+ * 请求；这里是唯一允许调用标准 MailExtension API（browser.accounts/
+ * browser.messages/browser.compose/...)的地方，api.js 本身不含任何邮件业务
+ * 语义（禁止 XPCOM MailServices 调用）。本轮 MAIL_ROUTE_READINESS 全部
+ * "not-implemented"，因此该函数目前对全部请求统一响应 E_NOT_IMPLEMENTED，
+ * 但完整的转发/响应回路是真实可用的，供后续实现能力的 PR 直接复用。
+ */
+async function handleMailRouteRequest(token: string, routeId: string, capability: string, bodyJson: string): Promise<void> {
+  if (!isMailRouteId(routeId) || MAIL_ROUTE_READINESS[routeId] !== "implemented") {
+    await browser.thunderbirdSkillBridge.failMailRoute(token, "E_NOT_IMPLEMENTED", "该邮件能力尚未实现");
+    return;
+  }
+  const handler = MAIL_ROUTE_BUSINESS_HANDLERS[routeId];
+  if (!handler) {
+    // readiness 与 handler 登记表本身出现漂移：视为未实现失败关闭，不猜测执行。
+    console.error(`Thunderbird Skill Bridge：route ${routeId} 标记为 implemented 但没有登记 handler`);
+    await browser.thunderbirdSkillBridge.failMailRoute(token, "E_NOT_IMPLEMENTED", "该邮件能力尚未实现");
+    return;
+  }
+  try {
+    const body: unknown = JSON.parse(bodyJson);
+    const result = await handler(body, { capability });
+    await browser.thunderbirdSkillBridge.respondMailRoute(token, JSON.stringify(result));
+  } catch (error) {
+    await browser.thunderbirdSkillBridge.failMailRoute(token, "E_INTERNAL", error instanceof Error ? error.message : "未知内部错误");
+  }
+}
+
+/**
+ * 启动期一次性核对：api.js 的 MAIL_ROUTES 与本文件的 MAIL_ROUTE_IDS 是两个
+ * 独立维护的镜像（跨 tsconfig rootDir 与特权作用域，无法共享同一份编译产物），
+ * 这里用运行时自检代替"人工保证不漂移"——任何一侧多出或缺失 route id 都会
+ * 在启动日志中给出明确诊断，而不是静默地在某条 route 上出现认知错误。
+ */
+async function verifyMailRouteRegistry(): Promise<boolean> {
+  try {
+    const remoteIds = await browser.thunderbirdSkillBridge.listMailRoutes();
+    const remoteSet = new Set(remoteIds);
+    const localSet = new Set<string>(MAIL_ROUTE_IDS);
+    const missingLocally = remoteIds.filter((id) => !localSet.has(id));
+    const missingRemotely = MAIL_ROUTE_IDS.filter((id) => !remoteSet.has(id));
+    if (missingLocally.length > 0 || missingRemotely.length > 0) {
+      console.error("Thunderbird Skill Bridge：邮件 route 登记表与特权桥 MAIL_ROUTES 不一致", { missingLocally, missingRemotely });
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error("Thunderbird Skill Bridge：无法核对邮件 route 登记表", error);
+    return false;
+  }
+}
+
 async function startBridge(): Promise<BridgeState> {
   try {
     const state = await browser.thunderbirdSkillBridge.start();
     console.info("Thunderbird Skill Bridge：Phase 1 回环服务已启动");
+    browser.thunderbirdSkillBridge.onMailRouteRequest.addListener(handleMailRouteRequest);
+    void verifyMailRouteRegistry();
     return {
       mode: "phase-1",
       protocolVersion: 1,

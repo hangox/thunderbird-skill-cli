@@ -511,16 +511,22 @@ function createLoopbackServer(preflight, dispatch) {
 }
 
 // ---------------------------------------------------------------------------
-// 邮件 route 通用管线：反原型污染的 body 守卫、opaque ref 绑定表与静态
-// route registry。这是 extension/src/schema.ts、extension/src/refs.ts、
-// src/contracts/routes.ts 三份纯 TS 参考实现在 Experiment 特权作用域下的
-// 运行时镜像——这里无法 `import` 编译产物，只能像本文件既有的
-// canonical()/isEd25519Spki() 那样手动保持同步，由测试兜底一致性。
-// 本轮只交付这套骨架与全部 stub handler（统一 501 E_NOT_IMPLEMENTED），不接
-// 线任何真实 mail adapter；后续实现只读/可逆/草稿-外发能力的 PR 只需要把
-// MAIL_ROUTE_HANDLERS 里对应条目换成真正的函数引用。范围裁决（team-lead，
-// 2026-07-27）：v0.3.0 不实现永久删除、watch、calendar，这里不冻结它们的
-// route，也不提供永久删除专用的 UI 人工确认回执登记表。
+// 邮件 route 通用管线：反原型污染的 body 守卫、opaque ref 绑定表、静态
+// route registry，以及把已认证请求转发给 background 执行的 Experiment→
+// background operation 通道（onMailRouteRequest 事件 + respondMailRoute/
+// failMailRoute 两个回调函数）。这是 extension/src/schema.ts、
+// extension/src/refs.ts、src/contracts/routes.ts 三份纯 TS 参考实现在
+// Experiment 特权作用域下的运行时镜像——这里无法 `import` 编译产物，只能像
+// 本文件既有的 canonical()/isEd25519Spki() 那样手动保持同步，由测试兜底
+// 一致性；listMailRoutes() 额外给 background 提供了一个运行时自检点。
+//
+// 关键边界：本文件（api.js）自身不实现任何邮件业务语义，不调用任何邮件相关
+// 的 XPCOM 组件——认证/capability/body 上限/反原型污染校验通过后就把请求
+// 原样转发给 background，由 background 用标准 MailExtension API 执行业务
+// 逻辑。本轮全部 route 在 background 侧仍标记 "not-implemented"，
+// 因此转发链路真实可用，但目前对任意邮件 route 请求都会统一收到
+// 501 E_NOT_IMPLEMENTED。范围裁决（team-lead，2026-07-27）：v0.3.0 不实现
+// 永久删除、watch、calendar，这里不冻结它们的 route。
 // ---------------------------------------------------------------------------
 
 const MAIL_DANGEROUS_KEYS = new Set(["__proto__", "prototype", "constructor"]);
@@ -541,6 +547,18 @@ function assertNoDangerousKeys(value) {
   }
 }
 
+// issue() 因配额耗尽而拒绝时抛出的显式类型错误，调用方可据此与其他内部错误
+// 区分，映射为稳定的错误语义而不是笼统的 500。与 extension/src/refs.ts 的
+// RefStoreCapacityError 是同一份设计的镜像。
+class RefStoreCapacityError extends Error {
+  constructor(kind, limit) {
+    super(`ref kind ${kind} 已达到在途上限（${limit}），拒绝签发新 ref`);
+    this.name = "RefStoreCapacityError";
+    this.kind = kind;
+    this.limit = limit;
+  }
+}
+
 // 与 extension/src/refs.ts 的 RefStore 是同一份设计的运行时镜像：CLI 是一次性
 // 进程，扩展实例在 Thunderbird 会话内长期存活，因此用内存绑定表（token →
 // {kind, clientId, pairingEpoch, payload, 过期时间}）而非自描述签名令牌；
@@ -556,13 +574,17 @@ function createRefStore(maxEntriesPerKind = 4000) {
     if (current > 0) countByKind.set(entry.kind, current - 1);
   }
   return {
+    // 过期回收：dispatch 在每个已认证请求上都会调用一次（见
+    // validateAuthenticatedRequest 里与 nonce 清理同一节奏的调用），因此即使
+    // 某个 kind 长时间没有新的 issue()，过期条目也会随请求流量被及时释放。
     prune(nowMs = Date.now()) {
       for (const [token, entry] of entries) if (entry.expiresAt <= nowMs) remove(token);
     },
     issue(kind, clientId, pairingEpoch, payload, ttlMs) {
+      if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new RangeError("ttlMs 必须是正有限数");
       this.prune();
       const current = countByKind.get(kind) ?? 0;
-      if (current >= maxEntriesPerKind) throw new Error(`ref kind ${kind} 已达到在途上限，拒绝签发新 ref`);
+      if (current >= maxEntriesPerKind) throw new RefStoreCapacityError(kind, maxEntriesPerKind);
       const nowMs = Date.now();
       let token;
       do { token = `${kind}_${randomHex(24)}`; } while (entries.has(token));
@@ -623,14 +645,107 @@ function findMailRoute(method, path) {
   return MAIL_ROUTES.find((route) => route.path === path);
 }
 
-function defaultMailRouteHandler() {
-  throw errorWithStatus(501, "该邮件能力尚未实现", "E_NOT_IMPLEMENTED");
+// background 用 failMailRoute 报告的错误码只信任这个已知集合，其余一律降级
+// 为 E_INTERNAL/500，防止业务侧的任意字符串直接冒充协议错误码进入 HTTP 响应。
+const MAIL_ROUTE_ERROR_STATUS = {
+  E_NOT_IMPLEMENTED: 501,
+  E_NOT_FOUND: 404,
+  E_POLICY_DENIED: 403,
+  E_CONFIRMATION_REQUIRED: 409,
+  E_VALIDATION: 400,
+  E_TIMEOUT: 408,
+  E_THUNDERBIRD_OFFLINE: 503,
+  E_INTERNAL: 500,
+};
+
+// 只在缺少 ExtensionCommon.EventManager 的环境（当前测试夹具）下生效的等价
+// 实现：register(fire) 在监听者数量 0→1 时调用一次并返回 unregister，
+// 语义与真实 EventManager 完全一致，因此 createMailRouteChannel 的其余逻辑
+// 不需要区分两条分支。真实 Thunderbird 环境优先使用 ExtensionCommon.EventManager，
+// 这样跨进程的 background↔特权层通信走 WebExtension 既定的结构化克隆通道。
+function createEventManager(context, name, register) {
+  if (typeof ExtensionCommon.EventManager === "function") {
+    return new ExtensionCommon.EventManager({ context, name, register }).api();
+  }
+  const listeners = new Set();
+  let unregister = null;
+  const fire = {
+    async(...args) { for (const listener of listeners) listener(...args); },
+    sync(...args) { for (const listener of listeners) listener(...args); },
+  };
+  return {
+    addListener(listener) {
+      listeners.add(listener);
+      if (listeners.size === 1) unregister = register(fire);
+    },
+    removeListener(listener) {
+      listeners.delete(listener);
+      if (listeners.size === 0 && unregister) { unregister(); unregister = null; }
+    },
+    hasListener(listener) { return listeners.has(listener); },
+  };
 }
 
-// 集成阶段把对应 id 的值从 defaultMailRouteHandler 换成真实 handler 函数引用即完成接线；
-// handler 签名：async ({ req, res, state, body, route }) => void，认证/风险/capability/
-// 反原型污染校验均已在 preflight/dispatch 完成，handler 只需处理业务逻辑并调用 writeJson。
-const MAIL_ROUTE_HANDLERS = Object.fromEntries(MAIL_ROUTES.map((route) => [route.id, defaultMailRouteHandler]));
+// api.js 本身不实现任何邮件业务语义、不调用任何邮件相关的 XPCOM 组件：
+// 认证/capability/body 上限/反原型污染校验通过后，把请求经
+// onMailRouteRequest 事件转发给 background；background 用标准
+// MailExtension API 执行真正的业务逻辑，再调用 respondMailRoute /
+// failMailRoute 之一唤醒这里挂起的 Promise。这个文件只负责转发、超时与
+// 错误码翻译。
+function createMailRouteChannel(context) {
+  const pending = new Map(); // token -> { resolve, reject, timer }
+  let fireEvent = null;
+  const event = createEventManager(context, "thunderbirdSkillBridge.onMailRouteRequest", (fire) => {
+    fireEvent = fire;
+    return () => { fireEvent = null; };
+  });
+  function settle(token, run) {
+    const entry = pending.get(token);
+    if (!entry) return false;
+    pending.delete(token);
+    hiddenWindow.clearTimeout(entry.timer);
+    run(entry);
+    return true;
+  }
+  return {
+    event,
+    hasListener: () => fireEvent !== null,
+    dispatch(token, routeId, capability, bodyJson, deadlineAt) {
+      return new Promise((resolve, reject) => {
+        if (!fireEvent) { reject(errorWithStatus(503, "background 尚未就绪，无法处理邮件能力请求", "E_THUNDERBIRD_OFFLINE")); return; }
+        const remaining = deadlineAt - Date.now();
+        if (remaining <= 0) { reject(errorWithStatus(408, "请求超过总时限", "E_TIMEOUT")); return; }
+        const timer = hiddenWindow.setTimeout(() => {
+          settle(token, (entry) => entry.reject(errorWithStatus(408, "background 未在时限内响应该邮件能力", "E_TIMEOUT")));
+        }, remaining);
+        pending.set(token, { resolve, reject, timer });
+        try {
+          fireEvent.async(token, routeId, capability, bodyJson);
+        } catch {
+          settle(token, (entry) => entry.reject(errorWithStatus(500, "邮件 route 转发失败", "E_INTERNAL")));
+        }
+      });
+    },
+    respond(token, resultJson) {
+      return settle(token, (entry) => {
+        let value;
+        try { value = JSON.parse(resultJson); }
+        catch { entry.reject(errorWithStatus(500, "background 响应不是有效 JSON", "E_INTERNAL")); return; }
+        entry.resolve(value);
+      });
+    },
+    fail(token, errorCode, errorMessage) {
+      return settle(token, (entry) => {
+        const status = Object.hasOwn(MAIL_ROUTE_ERROR_STATUS, errorCode) ? MAIL_ROUTE_ERROR_STATUS[errorCode] : 500;
+        const code = Object.hasOwn(MAIL_ROUTE_ERROR_STATUS, errorCode) ? errorCode : "E_INTERNAL";
+        entry.reject(errorWithStatus(status, typeof errorMessage === "string" && errorMessage ? errorMessage : "该邮件能力处理失败", code));
+      });
+    },
+    clear(message) {
+      for (const token of [...pending.keys()]) settle(token, (entry) => entry.reject(errorWithStatus(503, message || "服务已停止", "E_THUNDERBIRD_OFFLINE")));
+    },
+  };
+}
 
 function stateView(state) {
   return {
@@ -670,6 +785,7 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
       receipts: new Map(),
       nonces: new Map(),
       refStore: createRefStore(),
+      mailRouteChannel: createMailRouteChannel(context),
       error: null,
       startPromise: null,
       expiryTimer: null,
@@ -686,6 +802,7 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
       state.server = null;
       state.sessionToken = null;
       state.refStore.clear();
+      state.mailRouteChannel.clear(reason ?? "本地会话已停止");
       removeDescriptor(state.instanceId);
       state.descriptorPath = null;
       state.error = reason ?? state.error;
@@ -764,6 +881,9 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
       for (const [value, expiresAt] of state.nonces) if (expiresAt < now) state.nonces.delete(value);
       if (state.nonces.has(nonce)) throw errorWithStatus(409, "请求已重放", "E_REPLAY");
       state.nonces.set(nonce, timestampMs + MAX_CLOCK_SKEW_MS);
+      // opaque ref 的过期回收与 nonce 用同一节奏：搭在每个已认证请求上，
+      // 不依赖某个 kind 恰好被 issue() 才清理。
+      state.refStore.prune(now);
       const securityRequest = { method: req.method, path: req.path, host, protocol, requestId, timestamp, nonce, bodySha256, pairingEpoch, clientId, signature };
       if (options.requireSignature && !(await verifySignature(securityRequest, options.pairing || state.pairing))) throw errorWithStatus(401, "client 签名认证失败");
       // 验签本身是异步的：验签之后立刻复检 epoch，避免 await 期间 revoke 让旧签名仍被接受。
@@ -912,8 +1032,13 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
         const body = readJsonBody(req);
         assertNoDangerousKeys(body);
         ensureEpochUnchanged(req);
-        const handler = MAIL_ROUTE_HANDLERS[req.mailRoute.id] ?? defaultMailRouteHandler;
-        await handler({ req, res, state, body, route: req.mailRoute });
+        // api.js 到此为止：不解释任何邮件业务语义，只把已认证/已过 capability
+        // 门禁/已过反原型污染校验的请求转发给 background，等待其经
+        // respondMailRoute/failMailRoute 之一唤醒。
+        const token = `mreq_${randomHex(16)}`;
+        const result = await state.mailRouteChannel.dispatch(token, req.mailRoute.id, req.mailRoute.capability, JSON.stringify(body), req.deadlineAt);
+        ensureEpochUnchanged(req);
+        writeJson(res, 200, result);
         return;
       }
       throw errorWithStatus(400, "route 不允许");
@@ -1012,6 +1137,15 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
           refreshDescriptor();
           return stateView(state);
         },
+        // background 用它在启动时自检自己的 route 登记表是否与这里的
+        // MAIL_ROUTES 静态表一致，把"两份手写列表可能漂移"变成可验证的运行时断言。
+        listMailRoutes: async () => MAIL_ROUTES.map((route) => route.id),
+        // background 处理完（或判定未实现/拒绝）一条转发来的邮件 route 请求后
+        // 调用两者之一，唤醒 dispatch() 里挂起的 Promise；找不到对应 token
+        // （已超时/已响应过）时静默忽略，不对 background 暴露内部时序细节。
+        respondMailRoute: async (token, resultJson) => { state.mailRouteChannel.respond(token, resultJson); },
+        failMailRoute: async (token, errorCode, errorMessage) => { state.mailRouteChannel.fail(token, errorCode, errorMessage); },
+        onMailRouteRequest: state.mailRouteChannel.event,
       },
     };
   }

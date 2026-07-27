@@ -61,6 +61,17 @@ export interface ResolveContext {
 /** 单个 kind 允许持有的最大在途条目数；超过时先做一次过期清理，仍超限则拒绝签发新 ref，绝不静默驱逐仍有效的条目。 */
 const DEFAULT_MAX_ENTRIES_PER_KIND = 4_000;
 
+/** issue() 因配额耗尽而拒绝时抛出的显式类型错误，调用方可据此与"其他内部错误"区分并映射为稳定的 CLI 错误语义（而不是笼统的 500）。 */
+export class RefStoreCapacityError extends Error {
+  constructor(
+    readonly kind: RefKind,
+    readonly limit: number,
+  ) {
+    super(`ref kind ${kind} 已达到在途上限（${limit}），拒绝签发新 ref`);
+    this.name = "RefStoreCapacityError";
+  }
+}
+
 export class RefStore<T = unknown> {
   private readonly entries = new Map<string, RefEntry<T>>();
   private readonly countByKind = new Map<RefKind, number>();
@@ -74,17 +85,25 @@ export class RefStore<T = unknown> {
     return this.entries.size;
   }
 
+  /**
+   * 过期回收：调用方（api.js）应在每个已认证请求上都调用一次（与既有的
+   * nonce 清理同一节奏），而不是只在 issue() 内部懒清理——这样即使某个 kind
+   * 长时间没有新的 issue() 调用，过期条目也会随请求流量被及时释放，内存不会
+   * 无限期停留到下一次该 kind 被用到为止。
+   */
   prune(nowMs: number = this.source.nowMs()): void {
     for (const [token, entry] of this.entries) {
       if (entry.expiresAt <= nowMs) this.remove(token);
     }
   }
 
+  /** @throws {RefStoreCapacityError} 该 kind 在途配额已耗尽（已先做过一次过期回收）。 */
   issue(kind: RefKind, clientId: string, pairingEpoch: string, payload: T, ttlMs: number): string {
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new RangeError("ttlMs 必须是正有限数");
     this.prune();
     const current = this.countByKind.get(kind) ?? 0;
     if (current >= this.maxEntriesPerKind) {
-      throw new Error(`ref kind ${kind} 已达到在途上限，拒绝签发新 ref`);
+      throw new RefStoreCapacityError(kind, this.maxEntriesPerKind);
     }
     const nowMs = this.source.nowMs();
     let token: string;

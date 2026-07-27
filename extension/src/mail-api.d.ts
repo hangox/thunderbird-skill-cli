@@ -147,6 +147,68 @@ interface MessageDisplayTab {
   windowId?: number;
 }
 
+/**
+ * 可逆域（Task #30/mail-write）新增成员：`messages.update`/`messages.move`
+ * 用标准 `messagesUpdate`/`messagesMove` 权限（manifest.json 已申请）；
+ * `getAttachmentFile` 用 `messagesRead` 已覆盖的能力返回整份 `File`（附件没有
+ * 官方流式接口，见 docs/09 §A.5，内存风险由 route 层 10 MiB 总量上限约束）。
+ */
+interface MessageUpdateProperties {
+  read?: boolean;
+  flagged?: boolean;
+  junk?: boolean;
+  tags?: string[];
+}
+
+/** `messages.move()` 的目的地：官方文档用 `MailFolder` 形状（至少含 accountId/path），这里复用已声明的 `MailFolder`。`isUserAction` 是 TB 137+ 才有的可选项，本仓库不假设它存在。 */
+interface MessageMoveOptions {
+  isUserAction?: boolean;
+}
+
+/**
+ * compose 域（草稿/外发，`compose`/`compose.save` 权限已申请；`compose.send`
+ * 权限刻意未申请，见 manifest.json 顶部说明与 docs/09 附录 A.1——`sendMessage`
+ * 因此在真实 Thunderbird 环境中会因权限缺失而拒绝，这是"禁止真实发送"的
+ * 物理保证，而不仅是代码层判断）。
+ *
+ * `ComposeDetails` 字段覆盖范围基于 docs/01 附录 A 核对的官方文档子集，只列出
+ * 草稿/外发域实际用到的字段。
+ */
+interface ComposeDetails {
+  identityId?: string;
+  to?: string[];
+  cc?: string[];
+  bcc?: string[];
+  replyTo?: string[];
+  subject?: string;
+  body?: string;
+  plainTextBody?: string;
+  isPlainText?: boolean;
+  relatedMessageId?: number;
+  type?: string;
+  isModified?: boolean;
+  /** 本轮草稿不支持内联新增附件（见 mail/drafts.ts 头部说明），这里只在 send.ts 里用它做 attachmentDigest 摘要的输入——空数组即代表"当前草稿无附件"的稳定摘要。 */
+  attachments?: readonly unknown[];
+}
+
+interface ComposeTab {
+  id: number;
+  windowId?: number;
+}
+
+/** `saveMessage()` 官方返回 `messages` 数组"通常恰好一个元素"，但 TB<142 受 FCC 配置影响可能多于一个（docs/09 §A.5）；业务代码不得假设 `messages[0]` 必然存在或唯一，必须显式校验。 */
+interface ComposeSaveResult {
+  messages: MessageHeader[];
+  mode: "draft" | "template" | string;
+}
+
+type ComposeSendMode = "default" | "sendLater" | "sendNow";
+
+interface ComposeSendResult {
+  messages?: MessageHeader[];
+  mode?: string;
+}
+
 interface Browser {
   accounts: {
     list(includeFolders?: boolean): Promise<MailAccount[]>;
@@ -164,8 +226,22 @@ interface Browser {
     getFull(messageId: number): Promise<MessagePart>;
     getRaw(messageId: number): Promise<string>;
     listAttachments(messageId: number): Promise<MessageAttachment[]>;
+    getAttachmentFile(messageId: number, partName: string): Promise<File>;
+    update(messageId: number, newProperties: MessageUpdateProperties): Promise<void>;
+    move(messageIds: number[], destination: MailFolder, options?: MessageMoveOptions): Promise<void>;
   };
   messageDisplay: {
     open(options: MessageDisplayOpenOptions): Promise<MessageDisplayTab>;
+  };
+  compose: {
+    beginNew(messageIdOrDetails?: number | ComposeDetails, details?: ComposeDetails): Promise<ComposeTab>;
+    getComposeDetails(tabId: number): Promise<ComposeDetails>;
+    setComposeDetails(tabId: number, details: ComposeDetails): Promise<void>;
+    saveMessage(tabId: number, options?: { mode?: "draft" | "template" }): Promise<ComposeSaveResult>;
+    sendMessage(tabId: number, options?: { mode?: ComposeSendMode }): Promise<ComposeSendResult>;
+  };
+  /** 仅用于探测 compose 标签页是否仍存活（"绑定活着的 compose tab"）；不申请额外 `tabs` 权限——`compose.*` 已隐含可对自己开出的 tab 调用这些方法。 */
+  tabs: {
+    get(tabId: number): Promise<{ id: number }>;
   };
 }

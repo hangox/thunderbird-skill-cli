@@ -17,6 +17,17 @@ import { MAX_REF_TTL_MS, RefStore, type RandomTokenSource, type RefKind } from "
 // 消息/附件 ref 与 Thunderbird 原生 `id` 的生命周期语义一致（重启/移动后原生
 // id 本身就会失效，见 docs/01 附录 A.4②），给更短的 TTL；cursor 是分页续取用
 // 的短期状态，给最短的 TTL。
+//
+// draft/op/undo/confirm 四项（Task #30/mail-write 补充）：draft 与账号/文件夹
+// 同档——草稿从 create 到 send confirm 可能跨多次 CLI 调用，需要在扩展进程
+// 生命周期内保持稳定；op（operation 状态查询）同样给满上限，供事后查询；
+// undo 与 confirm 是有意更短的一次性令牌——undo 10 分钟、confirm 5 分钟，
+// 取值对齐 `reports/thunderbird-skill-cli-完整邮件能力方案-20260727.md`
+// §3.2/§3.3 的架构设计，缩短暴露窗口。attachments.fetch 的一次性 fetch
+// token 不走这张表：它的 TTL 由 `src/contracts/routes.ts` 冻结为
+// `ATTACHMENT_FETCH_TOKEN_TTL_MS`（2 分钟），在 `mail/attachments-write.ts`
+// 里直接调用 `mailRefStore.issue()` 传显式 ttlMs，不复用 "attachment" kind
+// 在这里的 15 分钟默认值。
 export const REF_TTL_MS = {
   acc: MAX_REF_TTL_MS,
   identity: MAX_REF_TTL_MS,
@@ -24,6 +35,10 @@ export const REF_TTL_MS = {
   msg: 15 * 60 * 1000,
   attachment: 15 * 60 * 1000,
   cursor: 5 * 60 * 1000,
+  draft: MAX_REF_TTL_MS,
+  op: MAX_REF_TTL_MS,
+  undo: 10 * 60 * 1000,
+  confirm: 5 * 60 * 1000,
 } as const;
 
 const tokenSource: RandomTokenSource = {
@@ -62,10 +77,15 @@ function resolveContext(context: MailAdapterContext): { clientId: string; pairin
  * `ErrorCode` 子集。`background.ts` 的 `handleOperation` 会优先读取
  * `error.code`（duck-typing，不要求 `instanceof MailAdapterError`）透传给
  * CLI，而不是无条件折叠成 `E_INTERNAL`。
+ *
+ * `E_CONFIRMATION_REQUIRED`（Task #30/mail-write 补充）：draft send confirm
+ * 阶段专用——确认不存在/已消费/草稿内容已变化时用它，与 undo/attachment 等
+ * 场景统一使用的 `E_NOT_FOUND` 是刻意不同的语义（前者是"请重新 prepare"，
+ * 后者是"对象不存在"，见 mail/send.ts 头部设计说明）。
  */
 export class MailAdapterError extends Error {
   constructor(
-    readonly code: "E_VALIDATION" | "E_NOT_FOUND" | "E_POLICY_DENIED" | "E_INTERNAL",
+    readonly code: "E_VALIDATION" | "E_NOT_FOUND" | "E_POLICY_DENIED" | "E_INTERNAL" | "E_CONFIRMATION_REQUIRED",
     message: string,
   ) {
     super(message);

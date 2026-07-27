@@ -1,25 +1,28 @@
 // ---------------------------------------------------------------------------
-// 邮件 route handler 接口骨架（仅类型 + 未实现登记表）。
+// 邮件 route handler 分发中枢。
 //
 // 实际的 HTTP 路由匹配、认证/风险/capability 校验与 dispatch 全部发生在
 // Experiment 特权作用域（extension/bridge/api.js），因为只有那里持有
 // loopback server 与 XPCOM 权限；background.ts 运行在普通 MV3 背景页作用域，
-// 拿不到这些权限，也不应该拿到。这里只声明后续实现 PR（只读/可逆/草稿-外发
-// 能力）要遵守的稳定接口形状，并把"哪些 route 尚未接线"列成一张类型检查过的
-// 登记表，供集成阶段核对覆盖率——把某个 route 的值从 "not-implemented" 换成
-// 真正的 handler 函数引用，就是接入该能力的唯一步骤，不需要改动其他任何地方。
+// 拿不到这些权限，也不应该拿到——这里是唯一允许调用标准 MailExtension API
+// （browser.accounts/browser.messages/browser.compose/...）的地方。
+//
+// 编译产物约束：background.js 以 classic script（非 module）形式被 manifest
+// 直接加载，最终产物不得含任何顶层 import/export（见 test/extension.test.mjs）。
+// 本文件源码里的 `import` 语句会在 `npm run build:extension` 的
+// `scripts/bundle-background.ts` 步骤里，与它依赖的 refs.ts/schema.ts/
+// mail/*.ts 一起被确定性拼接成一个零 import/export 的文件，覆盖写回
+// extension/dist/background.js——源码层面仍然是普通、可静态检查的 ES 模块。
 //
 // 范围裁决（team-lead，2026-07-27）：v0.3.0 不实现永久删除与 watch，因此
 // 这里不登记 messages.delete.prepare/confirm、watch.poll——它们在
 // src/contracts/routes.ts 里也没有对应 route。
 // ---------------------------------------------------------------------------
 
-// 注：background.js 以 classic script（非 module）形式被 manifest 直接加载，
-// 编译产物不得含任何顶层 import/export（见 test/extension.test.mjs）。类型
-// 声明（type/interface）编译时会被完全擦除，天然安全；下面两个 const 特意
-// 不加 export，只作为本文件内的骨架登记表。
+import { READ_MAIL_ROUTE_HANDLERS } from "./mail/index.js";
+import { mailRefStore } from "./mail/state.js";
+import type { MailAdapterContext } from "./mail/state.js";
 
-/** 与 extension/bridge/api.js 里镜像实现的 handler 签名一致：认证/风险/capability/schema 校验已在 dispatch 管线完成，handler 只处理业务逻辑。 */
 type MailRouteHandlerStatus = "not-implemented" | "implemented";
 
 const MAIL_ROUTE_IDS = [
@@ -44,38 +47,26 @@ const MAIL_ROUTE_IDS = [
 
 type MailRouteId = (typeof MAIL_ROUTE_IDS)[number];
 
-// 本轮（0.3.0 契约冻结 + 传输/Experiment 特权桥）只交付路由骨架，不接线任何
-// 真实 mail adapter；因此全部登记为 "not-implemented"。后续实现只读/可逆/
-// 草稿-外发能力的 PR 把对应条目改成 "implemented" 并在 extension/bridge/api.js
-// 的 ROUTE_REGISTRY 里把 stub handler 换成真实实现，二者必须同步。
-const MAIL_ROUTE_READINESS: Readonly<Record<MailRouteId, MailRouteHandlerStatus>> = {
-  "accounts.list": "not-implemented",
-  "folders.list": "not-implemented",
-  "messages.search": "not-implemented",
-  "messages.recent": "not-implemented",
-  "messages.get": "not-implemented",
-  "messages.open": "not-implemented",
-  "messages.mark": "not-implemented",
-  "messages.move": "not-implemented",
-  "messages.trash": "not-implemented",
-  "attachments.list": "not-implemented",
-  "attachments.save": "not-implemented",
-  "drafts.create": "not-implemented",
-  "drafts.update": "not-implemented",
-  "drafts.open": "not-implemented",
-  "drafts.send.prepare": "not-implemented",
-  "drafts.send.confirm": "not-implemented",
-  "operations.get": "not-implemented",
-};
+/** handler 签名：与 extension/src/mail/state.ts 的 `MailAdapterContext` 对齐，返回值可以是任意 JSON 可序列化结果（各 handler 自己声明更精确的返回类型，靠返回类型协变满足这里）。 */
+type MailRouteBusinessHandler = (body: unknown, context: MailAdapterContext) => Promise<unknown>;
 
-// 真正的业务 handler 登记表：key 与 MAIL_ROUTE_READINESS 一一对应，值为
-// `undefined`（尚未接线）或一个用标准 MailExtension API（browser.accounts/
-// browser.messages/browser.compose/...）实现业务逻辑的函数。本轮全部
-// "not-implemented"，因此这里必然是空对象；后续实现某条能力的 PR 同时把
-// MAIL_ROUTE_READINESS 对应项改成 "implemented" 并在这里补上函数引用，
-// handleOperation 会据此路由，不需要改动分发逻辑本身。
-type MailRouteBusinessHandler = (body: unknown, context: { capability: string }) => Promise<unknown>;
-const MAIL_ROUTE_BUSINESS_HANDLERS: Partial<Record<MailRouteId, MailRouteBusinessHandler>> = {};
+function isMailRouteId(value: string): value is MailRouteId {
+  return (MAIL_ROUTE_IDS as readonly string[]).includes(value);
+}
+
+function isKnownHandlerKey(value: string): value is keyof typeof READ_MAIL_ROUTE_HANDLERS {
+  return Object.hasOwn(READ_MAIL_ROUTE_HANDLERS, value);
+}
+
+// 只读邮件域（Task #29）的 7 个 handler 从 extension/src/mail/index.ts 的
+// 单一登记表接入；readiness 与 handler 表由同一份数据源派生，不存在"手动
+// 同步两张表"的漂移窗口——新增一个域只需要在 mail/index.ts 里补一张类似的
+// 登记表并在这里 import 合并即可。
+const MAIL_ROUTE_READINESS: Record<MailRouteId, MailRouteHandlerStatus> = Object.fromEntries(
+  MAIL_ROUTE_IDS.map((id) => [id, isKnownHandlerKey(id) ? "implemented" : "not-implemented"]),
+) as Record<MailRouteId, MailRouteHandlerStatus>;
+
+const MAIL_ROUTE_BUSINESS_HANDLERS: Partial<Record<MailRouteId, MailRouteBusinessHandler>> = { ...READ_MAIL_ROUTE_HANDLERS };
 
 interface ThunderbirdSkillBridgeState {
   serviceStarted: boolean;
@@ -120,19 +111,27 @@ const fallbackState: BridgeState = {
   error: "Experiment API 启动失败",
 };
 
-function isMailRouteId(value: string): value is MailRouteId {
-  return (MAIL_ROUTE_IDS as readonly string[]).includes(value);
+/** MailAdapterError 携带的 code 是 background.ts 唯一信任的错误码来源；未知形状统一降级为 E_INTERNAL，不猜测语义。 */
+function extractErrorCode(error: unknown): string {
+  if (error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string") {
+    return (error as { code: string }).code;
+  }
+  return "E_INTERNAL";
+}
+
+function extractErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "未知内部错误";
 }
 
 /**
  * api.js 通过 onOperation 转发已认证/已过 capability 门禁的邮件 route
- * 请求；这里是唯一允许调用标准 MailExtension API（browser.accounts/
- * browser.messages/browser.compose/...)的地方，api.js 本身不含任何邮件业务
- * 语义（禁止 XPCOM MailServices 调用）。本轮 MAIL_ROUTE_READINESS 全部
- * "not-implemented"，因此该函数目前对全部请求统一响应 E_NOT_IMPLEMENTED，
- * 但完整的转发/响应回路是真实可用的，供后续实现能力的 PR 直接复用。
+ * 请求，随事件一起携带 clientId/pairingEpoch（取自 api.js 已验证的
+ * securityRequest）。这里按 MAIL_ROUTE_READINESS 路由到已接入的业务
+ * handler；未实现或 handler 缺失一律失败关闭为 E_NOT_IMPLEMENTED，不猜测
+ * 执行。handler 抛出的错误优先读取其 `code` 字段透传给 CLI，而不是无条件
+ * 折叠成 E_INTERNAL。
  */
-async function handleOperation(token: string, routeId: string, capability: string, bodyJson: string): Promise<void> {
+async function handleOperation(token: string, routeId: string, capability: string, bodyJson: string, clientId: string, pairingEpoch: string): Promise<void> {
   if (!isMailRouteId(routeId) || MAIL_ROUTE_READINESS[routeId] !== "implemented") {
     await browser.thunderbirdSkillBridge.failOperation(token, "E_NOT_IMPLEMENTED", "该邮件能力尚未实现");
     return;
@@ -146,10 +145,10 @@ async function handleOperation(token: string, routeId: string, capability: strin
   }
   try {
     const body: unknown = JSON.parse(bodyJson);
-    const result = await handler(body, { capability });
+    const result = await handler(body, { capability, clientId, pairingEpoch });
     await browser.thunderbirdSkillBridge.respondToOperation(token, JSON.stringify(result));
   } catch (error) {
-    await browser.thunderbirdSkillBridge.failOperation(token, "E_INTERNAL", error instanceof Error ? error.message : "未知内部错误");
+    await browser.thunderbirdSkillBridge.failOperation(token, extractErrorCode(error), extractErrorMessage(error));
   }
 }
 
@@ -182,6 +181,10 @@ async function startBridge(): Promise<BridgeState> {
     const state = await browser.thunderbirdSkillBridge.start();
     console.info("Thunderbird Skill Bridge：Phase 1 回环服务已启动");
     browser.thunderbirdSkillBridge.onOperation.addListener(handleOperation);
+    // 配对撤销即等价于 epoch 推进（当前设计里只有这一条触发路径）：background
+    // 是 opaque ref 绑定表（mailRefStore）的唯一持有者，收到通知后必须清空，
+    // 否则旧 client 的 ref 会在重新配对的新 client 名下被错误复用。
+    browser.thunderbirdSkillBridge.onPairingRevoked.addListener(() => { mailRefStore.clear(); });
     void verifyMailRouteRegistry();
     return {
       mode: "phase-1",

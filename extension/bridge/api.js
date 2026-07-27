@@ -547,80 +547,12 @@ function assertNoDangerousKeys(value) {
   }
 }
 
-// 单个 ref 允许的最长存活时间：即使调用方传入更大的 ttlMs 也会被拒绝，不
-// 静默接受一个长期存活、扩大暴露窗口的 ref。与 extension/src/refs.ts 的
-// MAX_REF_TTL_MS 保持一致。
-const MAX_REF_TTL_MS = 30 * 60 * 1000;
-
-// issue() 因配额耗尽而拒绝时抛出的显式类型错误，调用方可据此与其他内部错误
-// 区分，映射为稳定的错误语义而不是笼统的 500。kind === "*" 表示命中的是跨
-// kind 的全局在途上限，不是某个具体 kind 的上限。与 extension/src/refs.ts 的
-// RefStoreCapacityError 是同一份设计的镜像。
-class RefStoreCapacityError extends Error {
-  constructor(kind, limit) {
-    super(kind === "*" ? `ref store 已达到全局在途上限（${limit}），拒绝签发新 ref` : `ref kind ${kind} 已达到在途上限（${limit}），拒绝签发新 ref`);
-    this.name = "RefStoreCapacityError";
-    this.kind = kind;
-    this.limit = limit;
-  }
-}
-
-// 与 extension/src/refs.ts 的 RefStore 是同一份设计的运行时镜像：CLI 是一次性
-// 进程，扩展实例在 Thunderbird 会话内长期存活，因此用内存绑定表（token →
-// {kind, clientId, pairingEpoch, payload, 过期时间}）而非自描述签名令牌；
-// resolve 要求 clientId 与 pairingEpoch 精确匹配，任一不符一律视为不存在。
-function createRefStore(maxEntriesPerKind = 4000, maxTotalEntries = 20000) {
-  const entries = new Map();
-  const countByKind = new Map();
-  function remove(token) {
-    const entry = entries.get(token);
-    if (!entry) return;
-    entries.delete(token);
-    const current = countByKind.get(entry.kind) ?? 0;
-    if (current > 0) countByKind.set(entry.kind, current - 1);
-  }
-  return {
-    // 过期回收：dispatch 在每个已认证请求上都会调用一次（见
-    // validateAuthenticatedRequest 里与 nonce 清理同一节奏的调用），因此即使
-    // 某个 kind 长时间没有新的 issue()，过期条目也会随请求流量被及时释放。
-    prune(nowMs = Date.now()) {
-      for (const [token, entry] of entries) if (entry.expiresAt <= nowMs) remove(token);
-    },
-    issue(kind, clientId, pairingEpoch, payload, ttlMs) {
-      if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw new RangeError("ttlMs 必须是正有限数");
-      if (ttlMs > MAX_REF_TTL_MS) throw new RangeError(`ttlMs 不得超过 MAX_REF_TTL_MS（${MAX_REF_TTL_MS}ms）`);
-      this.prune();
-      // 全局上限是压力回收的第二道防线：即使每个 kind 各自都没超限，合计条目
-      // 数也不得无界增长。
-      if (entries.size >= maxTotalEntries) throw new RefStoreCapacityError("*", maxTotalEntries);
-      const current = countByKind.get(kind) ?? 0;
-      if (current >= maxEntriesPerKind) throw new RefStoreCapacityError(kind, maxEntriesPerKind);
-      const nowMs = Date.now();
-      let token;
-      do { token = `${kind}_${randomHex(24)}`; } while (entries.has(token));
-      entries.set(token, { kind, clientId, pairingEpoch, payload, issuedAt: nowMs, expiresAt: nowMs + ttlMs });
-      countByKind.set(kind, current + 1);
-      return token;
-    },
-    // 解析失败（不存在/kind 不符/client 不符/epoch 不符/已过期）一律返回 undefined，
-    // 不区分具体原因；调用方必须统一映射为 E_NOT_FOUND，不得泄漏对象是否存在。
-    resolve(token, expectedKind, context) {
-      const entry = entries.get(token);
-      if (!entry || entry.kind !== expectedKind || entry.clientId !== context.clientId || entry.pairingEpoch !== context.pairingEpoch) return undefined;
-      if (entry.expiresAt <= context.nowMs) { remove(token); return undefined; }
-      return entry.payload;
-    },
-    consume(token) { remove(token); },
-    revokeAllForClient(clientId) {
-      for (const [token, entry] of entries) if (entry.clientId === clientId) remove(token);
-    },
-    clear() { entries.clear(); countByKind.clear(); },
-    get size() { return entries.size; },
-  };
-}
-
-// draft send 的 prepare/confirm 外发确认走 RefStore 的 "confirm" kind
-// （revision/收件人/主题/附件 digest 绑定）。
+// opaque ref 的唯一真源是 extension/src/mail/state.ts 的 mailRefStore
+// 单例，运行在 background（非特权 MV3 script）里——这是 Task #33 平台层
+// 的显式设计决定：只读/可逆/草稿三个业务域共享同一份 in-memory 绑定表，
+// api.js（特权层）不再持有第二份 RefStore 实例，避免双真源。api.js 只在
+// revokePairing 时通过 onPairingRevoked 事件通知 background 清空其
+// mailRefStore，自身不接触任何 ref 的 issue/resolve。
 
 const MAIL_ROUTE_PREFIX = "/v1/mail/";
 
@@ -698,12 +630,30 @@ function createEventManager(context, name, register) {
   };
 }
 
+// 单向通知事件的通用外壳：没有 respond/fail 回调，只是"告诉 background 发生
+// 了某件事"（目前只用于 onPairingRevoked）。fire() 在没有监听者时静默丢弃——
+// background 还没启动完成时错过一次通知是可接受的，因为它启动后会拿到全新的
+// instanceId/pairingEpoch，不存在"背景错过通知导致 ref 未清空"的窗口。
+function createNotificationEvent(context, name) {
+  let fireEvent = null;
+  const event = createEventManager(context, name, (fire) => {
+    fireEvent = fire;
+    return () => { fireEvent = null; };
+  });
+  return {
+    event,
+    fire(...args) { if (fireEvent) fireEvent.async(...args); },
+  };
+}
+
 // api.js 本身不实现任何邮件业务语义、不调用任何邮件相关的 XPCOM 组件：
 // 认证/capability/body 上限/反原型污染校验通过后，把请求经
 // onOperation 事件转发给 background；background 用标准
 // MailExtension API 执行真正的业务逻辑，再调用 respondToOperation /
 // failOperation 之一唤醒这里挂起的 Promise。这个文件只负责转发、超时与
-// 错误码翻译。
+// 错误码翻译。clientId/pairingEpoch 随事件一起转发，供 background 侧的
+// opaque ref 绑定使用（取自 api.js 已验证的 securityRequest，不是
+// background 自己声称的值）。
 function createOperationChannel(context) {
   const pending = new Map(); // token -> { resolve, reject, timer }
   let fireEvent = null;
@@ -722,7 +672,7 @@ function createOperationChannel(context) {
   return {
     event,
     hasListener: () => fireEvent !== null,
-    dispatch(token, routeId, capability, bodyJson, deadlineAt) {
+    dispatch(token, routeId, capability, bodyJson, clientId, pairingEpoch, deadlineAt) {
       return new Promise((resolve, reject) => {
         if (!fireEvent) { reject(errorWithStatus(503, "background 尚未就绪，无法处理邮件能力请求", "E_THUNDERBIRD_OFFLINE")); return; }
         const remaining = deadlineAt - Date.now();
@@ -732,7 +682,7 @@ function createOperationChannel(context) {
         }, remaining);
         pending.set(token, { resolve, reject, timer });
         try {
-          fireEvent.async(token, routeId, capability, bodyJson);
+          fireEvent.async(token, routeId, capability, bodyJson, clientId, pairingEpoch);
         } catch {
           settle(token, (entry) => entry.reject(errorWithStatus(500, "邮件 route 转发失败", "E_INTERNAL")));
         }
@@ -796,8 +746,8 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
       pending: null,
       receipts: new Map(),
       nonces: new Map(),
-      refStore: createRefStore(),
       operationChannel: createOperationChannel(context),
+      pairingRevokedEvent: createNotificationEvent(context, "thunderbirdSkillBridge.onPairingRevoked"),
       error: null,
       startPromise: null,
       expiryTimer: null,
@@ -813,7 +763,6 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
       const server = state.server;
       state.server = null;
       state.sessionToken = null;
-      state.refStore.clear();
       state.operationChannel.clear(reason ?? "本地会话已停止");
       removeDescriptor(state.instanceId);
       state.descriptorPath = null;
@@ -893,9 +842,6 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
       for (const [value, expiresAt] of state.nonces) if (expiresAt < now) state.nonces.delete(value);
       if (state.nonces.has(nonce)) throw errorWithStatus(409, "请求已重放", "E_REPLAY");
       state.nonces.set(nonce, timestampMs + MAX_CLOCK_SKEW_MS);
-      // opaque ref 的过期回收与 nonce 用同一节奏：搭在每个已认证请求上，
-      // 不依赖某个 kind 恰好被 issue() 才清理。
-      state.refStore.prune(now);
       const securityRequest = { method: req.method, path: req.path, host, protocol, requestId, timestamp, nonce, bodySha256, pairingEpoch, clientId, signature };
       if (options.requireSignature && !(await verifySignature(securityRequest, options.pairing || state.pairing))) throw errorWithStatus(401, "client 签名认证失败");
       // 验签本身是异步的：验签之后立刻复检 epoch，避免 await 期间 revoke 让旧签名仍被接受。
@@ -1048,7 +994,10 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
         // 门禁/已过反原型污染校验的请求转发给 background，等待其经
         // respondToOperation/failOperation 之一唤醒。
         const token = `opreq_${randomHex(16)}`;
-        const result = await state.operationChannel.dispatch(token, req.mailRoute.id, req.mailRoute.capability, JSON.stringify(body), req.deadlineAt);
+        const result = await state.operationChannel.dispatch(
+          token, req.mailRoute.id, req.mailRoute.capability, JSON.stringify(body),
+          req.authenticated.securityRequest.clientId, req.authenticated.pairingEpoch, req.deadlineAt,
+        );
         ensureEpochUnchanged(req);
         writeJson(res, 200, result);
         return;
@@ -1137,13 +1086,16 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
           // 这样即使在中途崩溃，重启后 epoch 也只会更大，绝不会让旧签名重新生效。
           state.pairingEpoch += 1n;
           savePairingEpoch(state.pairingEpoch);
-          // 撤销的 client 持有的全部 opaque ref 必须随之失效，否则旧 client 的
-          // ref 会在重新配对的新 client 名下被错误复用。
-          if (state.pairing) state.refStore.revokeAllForClient(state.pairing.clientId);
           // 撤销前发起、仍在等待 background 响应的 operation 必须立即失败，
           // 不能悬挂到各自的请求 deadline 才超时——那样会让调用方误以为还在
           // 正常处理，也会让已经不再合法的 client 继续占用挂起槽位。
           state.operationChannel.clear("配对已被撤销");
+          // opaque ref 的唯一真源在 background（mail/state.ts 的
+          // mailRefStore），api.js 不持有第二份 ref 表；这里只负责把"配对
+          // 撤销/epoch 已推进"这件事通知给 background，由它清空自己的
+          // mailRefStore——否则旧 client 的 ref 会在重新配对的新 client
+          // 名下被错误复用。
+          state.pairingRevokedEvent.fire();
           clearPairing();
           state.pairing = null;
           state.pending = null;
@@ -1162,6 +1114,9 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
         respondToOperation: async (token, resultJson) => { state.operationChannel.respond(token, resultJson); },
         failOperation: async (token, errorCode, errorMessage) => { state.operationChannel.fail(token, errorCode, errorMessage); },
         onOperation: state.operationChannel.event,
+        // 配对撤销（等价于 epoch 推进）时触发，background 收到后必须清空
+        // 其持有的 mailRefStore；参见 revokePairing 里的 fire() 调用。
+        onPairingRevoked: state.pairingRevokedEvent.event,
         // 账号/能力授权 UI（Task #30/mail-write）写入已配对 client capabilities
         // 的唯一入口；E1 只提供该入口本身，不实现调用它的 UI。覆盖式写入
         // （不是增量 add），生产环境在该 UI 存在并调用它之前，capabilities

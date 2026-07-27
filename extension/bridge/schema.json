@@ -82,13 +82,21 @@
       {
         "name": "onOperation",
         "type": "function",
-        "description": "api.js 完成认证/capability/body 上限校验后，把已授权的邮件 route 请求作为一个 operation 转发给 background；background 必须调用 respondToOperation 或 failOperation 之一来响应，api.js 本身不解释任何邮件业务语义。",
+        "description": "api.js 完成认证/capability/body 上限校验后，把已授权的邮件 route 请求作为一个 operation 转发给 background；background 必须调用 respondToOperation 或 failOperation 之一来响应，api.js 本身不解释任何邮件业务语义。clientId/pairingEpoch 取自 api.js 已验证的 req.authenticated.securityRequest，供 background 侧的 opaque ref 绑定使用，不是 background 自己声称的值。",
         "parameters": [
           { "name": "token", "type": "string" },
           { "name": "routeId", "type": "string" },
           { "name": "capability", "type": "string" },
-          { "name": "bodyJson", "type": "string" }
+          { "name": "bodyJson", "type": "string" },
+          { "name": "clientId", "type": "string" },
+          { "name": "pairingEpoch", "type": "string" }
         ]
+      },
+      {
+        "name": "onPairingRevoked",
+        "type": "function",
+        "description": "配对被撤销（含 pairingEpoch 推进）时触发。background 收到后必须清空其持有的全部 opaque ref（当前设计里配对撤销即等价于 epoch 推进，两者是同一事件，不存在只推进 epoch 不撤销配对的路径）。",
+        "parameters": []
       }
     ]
   }

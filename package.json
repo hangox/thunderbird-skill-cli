@@ -17,7 +17,7 @@
   "scripts": {
     "build": "npm run build:cli && npm run build:extension",
     "build:cli": "tsc -p tsconfig.json",
-    "build:extension": "tsc -p extension/tsconfig.json",
+    "build:extension": "tsc -p extension/tsconfig.json && node scripts/bundle-background.ts",
     "package:extension": "npm run build:extension && node scripts/package-extension.ts",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p extension/tsconfig.json --noEmit",
     "test": "npm run build && node scripts/package-extension.ts && node --test test/*.test.mjs",

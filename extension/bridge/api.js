@@ -523,10 +523,13 @@ function createLoopbackServer(preflight, dispatch) {
 // 关键边界：本文件（api.js）自身不实现任何邮件业务语义，不调用任何邮件相关
 // 的 XPCOM 组件——认证/capability/body 上限/反原型污染校验通过后就把请求
 // 原样转发给 background，由 background 用标准 MailExtension API 执行业务
-// 逻辑。本轮全部 route 在 background 侧仍标记 "not-implemented"，
-// 因此转发链路真实可用，但目前对任意邮件 route 请求都会统一收到
-// 501 E_NOT_IMPLEMENTED。范围裁决（team-lead，2026-07-27）：v0.3.0 不实现
-// 永久删除、watch、calendar，这里不冻结它们的 route。
+// 逻辑。只读域 7 条 route（accounts.list/folders.list/messages.search/
+// messages.recent/messages.get/messages.open/attachments.list）已在
+// background 侧接入真实 handler；其余 route 仍标记 "not-implemented"，
+// 统一收到 501 E_NOT_IMPLEMENTED，接入方式与已实现的 7 条完全一致（见
+// extension/src/background.ts 的 MAIL_ROUTE_READINESS 派生逻辑）。范围裁决
+// （team-lead，2026-07-27）：v0.3.0 不实现永久删除、watch、calendar，这里
+// 不冻结它们的 route。
 // ---------------------------------------------------------------------------
 
 const MAIL_DANGEROUS_KEYS = new Set(["__proto__", "prototype", "constructor"]);

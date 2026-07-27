@@ -1,23 +1,26 @@
 export const CLI_SCHEMA_VERSION = "1.0" as const;
 
-export type ErrorCode =
-  | "E_USAGE"
-  | "E_NOT_IMPLEMENTED"
-  | "E_NOT_PAIRED"
-  | "E_THUNDERBIRD_OFFLINE"
-  | "E_AMBIGUOUS_INSTANCE"
-  | "E_AUTH"
-  | "E_REPLAY"
-  | "E_PAIRING_PENDING"
-  | "E_ALREADY_PAIRED"
-  | "E_PAIRING_CHANGED"
-  | "E_VERSION_MISMATCH"
-  | "E_VALIDATION"
-  | "E_CONFIRMATION_REQUIRED"
-  | "E_POLICY_DENIED"
-  | "E_NOT_FOUND"
-  | "E_TIMEOUT"
-  | "E_INTERNAL";
+export const ERROR_CODES = [
+  "E_USAGE",
+  "E_NOT_IMPLEMENTED",
+  "E_NOT_PAIRED",
+  "E_THUNDERBIRD_OFFLINE",
+  "E_AMBIGUOUS_INSTANCE",
+  "E_AUTH",
+  "E_REPLAY",
+  "E_PAIRING_PENDING",
+  "E_ALREADY_PAIRED",
+  "E_PAIRING_CHANGED",
+  "E_VERSION_MISMATCH",
+  "E_VALIDATION",
+  "E_CONFIRMATION_REQUIRED",
+  "E_POLICY_DENIED",
+  "E_NOT_FOUND",
+  "E_TIMEOUT",
+  "E_INTERNAL",
+] as const;
+
+export type ErrorCode = (typeof ERROR_CODES)[number];
 
 export interface SuccessEnvelope<T> {
   schemaVersion: typeof CLI_SCHEMA_VERSION;

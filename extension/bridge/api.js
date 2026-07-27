@@ -86,7 +86,7 @@ function writeFully(stream, value) {
 }
 
 function reasonPhrase(status) {
-  return ({ 200: "OK", 201: "Created", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout", 409: "Conflict", 413: "Content Too Large", 431: "Request Header Fields Too Large", 500: "Internal Server Error", 503: "Service Unavailable" })[status] || "Rejected";
+  return ({ 200: "OK", 201: "Created", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout", 409: "Conflict", 413: "Content Too Large", 426: "Upgrade Required", 431: "Request Header Fields Too Large", 500: "Internal Server Error", 501: "Not Implemented", 503: "Service Unavailable" })[status] || "Rejected";
 }
 
 function drainResponse(connection, output = connection.output) {
@@ -510,6 +510,141 @@ function createLoopbackServer(preflight, dispatch) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// 邮件 route 通用管线：反原型污染的 body 守卫、opaque ref 绑定表、UI 人工确认
+// 回执登记表与静态 route registry。这是 extension/src/schema.ts、
+// extension/src/refs.ts、src/contracts/routes.ts 三份纯 TS 参考实现在
+// Experiment 特权作用域下的运行时镜像——这里无法 `import` 编译产物，只能像本
+// 文件既有的 canonical()/isEd25519Spki() 那样手动保持同步，由测试兜底一致性。
+// 本轮只交付这套骨架与全部 stub handler（统一 501 E_NOT_IMPLEMENTED），不接
+// 线任何真实 mail adapter；后续实现只读/可逆/草稿-外发能力的 PR 只需要把
+// MAIL_ROUTE_HANDLERS 里对应条目换成真正的函数引用。
+// ---------------------------------------------------------------------------
+
+const MAIL_DANGEROUS_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+// 递归拒绝危险键，是进入任何业务逻辑前的最低限度防原型污染防线；具体字段级
+// 的未知字段/长度/枚举上限校验由各 route 实现 PR 用 extension/src/schema.ts
+// 同款 shape 补齐，这里不预判尚未冻结的业务 schema。
+function assertNoDangerousKeys(value) {
+  if (Array.isArray(value)) { value.forEach((item) => assertNoDangerousKeys(item)); return; }
+  if (!isPlainObject(value)) return;
+  for (const key of Object.keys(value)) {
+    if (MAIL_DANGEROUS_KEYS.has(key)) throw errorWithStatus(400, "请求 body 包含禁止的键名", "E_VALIDATION");
+    assertNoDangerousKeys(value[key]);
+  }
+}
+
+// 与 extension/src/refs.ts 的 RefStore 是同一份设计的运行时镜像：CLI 是一次性
+// 进程，扩展实例在 Thunderbird 会话内长期存活，因此用内存绑定表（token →
+// {kind, clientId, pairingEpoch, payload, 过期时间}）而非自描述签名令牌；
+// resolve 要求 clientId 与 pairingEpoch 精确匹配，任一不符一律视为不存在。
+function createRefStore(maxEntriesPerKind = 4000) {
+  const entries = new Map();
+  const countByKind = new Map();
+  function remove(token) {
+    const entry = entries.get(token);
+    if (!entry) return;
+    entries.delete(token);
+    const current = countByKind.get(entry.kind) ?? 0;
+    if (current > 0) countByKind.set(entry.kind, current - 1);
+  }
+  return {
+    prune(nowMs = Date.now()) {
+      for (const [token, entry] of entries) if (entry.expiresAt <= nowMs) remove(token);
+    },
+    issue(kind, clientId, pairingEpoch, payload, ttlMs) {
+      this.prune();
+      const current = countByKind.get(kind) ?? 0;
+      if (current >= maxEntriesPerKind) throw new Error(`ref kind ${kind} 已达到在途上限，拒绝签发新 ref`);
+      const nowMs = Date.now();
+      let token;
+      do { token = `${kind}_${randomHex(24)}`; } while (entries.has(token));
+      entries.set(token, { kind, clientId, pairingEpoch, payload, issuedAt: nowMs, expiresAt: nowMs + ttlMs });
+      countByKind.set(kind, current + 1);
+      return token;
+    },
+    // 解析失败（不存在/kind 不符/client 不符/epoch 不符/已过期）一律返回 undefined，
+    // 不区分具体原因；调用方必须统一映射为 E_NOT_FOUND，不得泄漏对象是否存在。
+    resolve(token, expectedKind, context) {
+      const entry = entries.get(token);
+      if (!entry || entry.kind !== expectedKind || entry.clientId !== context.clientId || entry.pairingEpoch !== context.pairingEpoch) return undefined;
+      if (entry.expiresAt <= context.nowMs) { remove(token); return undefined; }
+      return entry.payload;
+    },
+    consume(token) { remove(token); },
+    revokeAllForClient(clientId) {
+      for (const [token, entry] of entries) if (entry.clientId === clientId) remove(token);
+    },
+    clear() { entries.clear(); countByKind.clear(); },
+    get size() { return entries.size; },
+  };
+}
+
+// message delete 的 prepare/confirm 契约的执行侧原语：prepare 只产出 preview
+// （经 RefStore、kind="preview"），永远不直接产出可执行的 confirm。只有
+// Thunderbird UI 中的人工确认动作（不在本轮范围，由后续 UI 集成 PR 调用
+// grant()）登记回执后，confirm 阶段才能凭 previewId 换取一次性执行权限。
+// 没有回执时 confirm 恒为 E_CONFIRMATION_REQUIRED，不存在 force/yes 绕过参数。
+function createUiConfirmationRegistry() {
+  const receipts = new Map();
+  return {
+    grant(previewId, contentDigest, nowMs) { receipts.set(previewId, { previewId, grantedAt: nowMs, contentDigest }); },
+    takeReceipt(previewId) {
+      const receipt = receipts.get(previewId);
+      if (receipt) receipts.delete(previewId);
+      return receipt;
+    },
+    deny(previewId) { receipts.delete(previewId); },
+    clear() { receipts.clear(); },
+  };
+}
+
+const MAIL_ROUTE_PREFIX = "/v1/mail/";
+
+// 与 src/contracts/routes.ts 的 MAIL_ROUTES 逐条对应（method 固定 POST）；
+// 修改任一处的 id/path/capability/maxRequestBodyBytes 都必须同步另一处。
+const MAIL_ROUTES = [
+  { id: "accounts.list", path: `${MAIL_ROUTE_PREFIX}accounts.list`, capability: "mail.read.v1", maxRequestBodyBytes: 1024 },
+  { id: "folders.list", path: `${MAIL_ROUTE_PREFIX}folders.list`, capability: "mail.read.v1", maxRequestBodyBytes: 2048 },
+  { id: "messages.search", path: `${MAIL_ROUTE_PREFIX}messages.search`, capability: "mail.read.v1", maxRequestBodyBytes: 8192 },
+  { id: "messages.recent", path: `${MAIL_ROUTE_PREFIX}messages.recent`, capability: "mail.read.v1", maxRequestBodyBytes: 2048 },
+  { id: "messages.get", path: `${MAIL_ROUTE_PREFIX}messages.get`, capability: "mail.read.v1", maxRequestBodyBytes: 2048 },
+  { id: "messages.open", path: `${MAIL_ROUTE_PREFIX}messages.open`, capability: "mail.read.v1", maxRequestBodyBytes: 1024 },
+  { id: "messages.mark", path: `${MAIL_ROUTE_PREFIX}messages.mark`, capability: "mail.reversible.v1", maxRequestBodyBytes: 8192 },
+  { id: "messages.move", path: `${MAIL_ROUTE_PREFIX}messages.move`, capability: "mail.reversible.v1", maxRequestBodyBytes: 8192 },
+  { id: "messages.trash", path: `${MAIL_ROUTE_PREFIX}messages.trash`, capability: "mail.reversible.v1", maxRequestBodyBytes: 8192 },
+  { id: "messages.delete.prepare", path: `${MAIL_ROUTE_PREFIX}messages.delete.prepare`, capability: "mail.delete-confirmed.v1", maxRequestBodyBytes: 4096 },
+  { id: "messages.delete.confirm", path: `${MAIL_ROUTE_PREFIX}messages.delete.confirm`, capability: "mail.delete-confirmed.v1", maxRequestBodyBytes: 2048 },
+  { id: "attachments.list", path: `${MAIL_ROUTE_PREFIX}attachments.list`, capability: "mail.read.v1", maxRequestBodyBytes: 1024 },
+  { id: "attachments.save", path: `${MAIL_ROUTE_PREFIX}attachments.save`, capability: "mail.reversible.v1", maxRequestBodyBytes: 4096 },
+  { id: "drafts.create", path: `${MAIL_ROUTE_PREFIX}drafts.create`, capability: "draft.write.v1", maxRequestBodyBytes: 8192 },
+  { id: "drafts.update", path: `${MAIL_ROUTE_PREFIX}drafts.update`, capability: "draft.write.v1", maxRequestBodyBytes: 8192 },
+  { id: "drafts.open", path: `${MAIL_ROUTE_PREFIX}drafts.open`, capability: "draft.write.v1", maxRequestBodyBytes: 1024 },
+  { id: "drafts.send.prepare", path: `${MAIL_ROUTE_PREFIX}drafts.send.prepare`, capability: "mail.send-confirmed.v1", maxRequestBodyBytes: 2048 },
+  { id: "drafts.send.confirm", path: `${MAIL_ROUTE_PREFIX}drafts.send.confirm`, capability: "mail.send-confirmed.v1", maxRequestBodyBytes: 2048 },
+  { id: "operations.get", path: `${MAIL_ROUTE_PREFIX}operations.get`, capability: "mail.read.v1", maxRequestBodyBytes: 1024 },
+  { id: "watch.poll", path: `${MAIL_ROUTE_PREFIX}watch.poll`, capability: "mail.watch.v1", maxRequestBodyBytes: 2048 },
+];
+
+function findMailRoute(method, path) {
+  if (method !== "POST") return undefined;
+  return MAIL_ROUTES.find((route) => route.path === path);
+}
+
+function defaultMailRouteHandler() {
+  throw errorWithStatus(501, "该邮件能力尚未实现", "E_NOT_IMPLEMENTED");
+}
+
+// 集成阶段把对应 id 的值从 defaultMailRouteHandler 换成真实 handler 函数引用即完成接线；
+// handler 签名：async ({ req, res, state, body, route }) => void，认证/风险/capability/
+// 反原型污染校验均已在 preflight/dispatch 完成，handler 只需处理业务逻辑并调用 writeJson。
+const MAIL_ROUTE_HANDLERS = Object.fromEntries(MAIL_ROUTES.map((route) => [route.id, defaultMailRouteHandler]));
+
 function stateView(state) {
   return {
     serviceStarted: Boolean(state.server),
@@ -547,6 +682,8 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
       pending: null,
       receipts: new Map(),
       nonces: new Map(),
+      refStore: createRefStore(),
+      uiConfirmations: createUiConfirmationRegistry(),
       error: null,
       startPromise: null,
       expiryTimer: null,
@@ -562,6 +699,8 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
       const server = state.server;
       state.server = null;
       state.sessionToken = null;
+      state.refStore.clear();
+      state.uiConfirmations.clear();
       removeDescriptor(state.instanceId);
       state.descriptorPath = null;
       state.error = reason ?? state.error;
@@ -691,6 +830,20 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
         req.pairingCandidate = candidate;
         return;
       }
+      // 全部邮件 route：无论是否已配对都强制要求签名（requireSignature: true）。
+      // 未配对时 state.pairing 为 null，verifySignature(request, null) 恒为
+      // false，因此自然落到 401，实现"未配对失败关闭"，不需要额外分支。
+      const mailRoute = findMailRoute(req.method, req.path);
+      if (mailRoute) {
+        req.authenticated = await validateAuthenticatedRequest(req, { requireSignature: true });
+        // capability 只看配对时授予的静态集合，绝不接受请求体/请求头自称的能力或风险等级。
+        const granted = state.pairing?.capabilities ?? [];
+        if (!granted.includes(mailRoute.capability)) throw errorWithStatus(403, "当前配对未获授予该能力", "E_POLICY_DENIED");
+        if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(readHeader(req, "Content-Type").trim())) throw errorWithStatus(400, "请求 Content-Type 不合法");
+        if (req.contentLength > mailRoute.maxRequestBodyBytes) throw errorWithStatus(413, "请求 body 超过该 route 的硬上限");
+        req.mailRoute = mailRoute;
+        return;
+      }
       await validateAuthenticatedRequest(req, { requireSignature: Boolean(state.pairing) });
       throw errorWithStatus(400, "route 不允许");
     }
@@ -710,7 +863,9 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
           extensionVersion: EXTENSION_VERSION,
           instanceId: state.instanceId,
           profileId: state.profileId,
-          capabilities: [],
+          // 账号/能力授权 UI 尚未实现：目前恒为配对记录里的静态 capabilities
+          // （confirmPairing 写入 []），不会凭空出现任何邮件 capability。
+          capabilities: state.pairing?.capabilities ?? [],
           pairingState: state.pairingState,
           pairingEpoch: currentEpoch(),
           authorizedAccountRefs: [],
@@ -764,6 +919,16 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
           return;
         }
         writeJson(res, 200, { intentId, pairingState: candidate.isReceipt ? candidate.pairingState : "pairing", clientId: candidate.clientId, expiresAt: candidate.expiresAt });
+        return;
+      }
+      if (req.mailRoute) {
+        // preflight 到这里之间也可能发生 revoke：签名验证已通过不代表 epoch 仍然当前。
+        ensureEpochUnchanged(req);
+        const body = readJsonBody(req);
+        assertNoDangerousKeys(body);
+        ensureEpochUnchanged(req);
+        const handler = MAIL_ROUTE_HANDLERS[req.mailRoute.id] ?? defaultMailRouteHandler;
+        await handler({ req, res, state, body, route: req.mailRoute });
         return;
       }
       throw errorWithStatus(400, "route 不允许");
@@ -827,7 +992,9 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
         confirmPairing: async (intentId, code) => {
           if (!state.pending || state.pending.intentId !== intentId || !constantTimeEqual(state.pending.code, code) || Date.parse(state.pending.expiresAt) <= Date.now()) throw new Error("配对确认无效或已过期");
           const confirmed = state.pending;
-          state.pairing = { clientId: confirmed.clientId, publicKeyAlgorithm: confirmed.publicKeyAlgorithm, publicKeySpkiBase64: confirmed.publicKeySpkiBase64, createdAt: new Date().toISOString() };
+          // capabilities 默认空集：账号/能力授权 UI 是未来工作项，未上线前一律
+          // 不自动授予任何邮件 capability，全部邮件 route 因此失败关闭。
+          state.pairing = { clientId: confirmed.clientId, publicKeyAlgorithm: confirmed.publicKeyAlgorithm, publicKeySpkiBase64: confirmed.publicKeySpkiBase64, capabilities: [], createdAt: new Date().toISOString() };
           savePairing(state.pairing);
           state.receipts.set(confirmed.intentId, {
             intentId: confirmed.intentId,
@@ -848,6 +1015,10 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
           // 这样即使在中途崩溃，重启后 epoch 也只会更大，绝不会让旧签名重新生效。
           state.pairingEpoch += 1n;
           savePairingEpoch(state.pairingEpoch);
+          // 撤销的 client 持有的全部 opaque ref 与在途 UI 确认回执必须随之失效，
+          // 否则旧 client 的 ref 会在重新配对的新 client 名下被错误复用。
+          if (state.pairing) state.refStore.revokeAllForClient(state.pairing.clientId);
+          state.uiConfirmations.clear();
           clearPairing();
           state.pairing = null;
           state.pending = null;

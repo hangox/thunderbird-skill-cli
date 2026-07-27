@@ -182,6 +182,90 @@ for (const [errorCode, expectedStatus] of [
   });
 }
 
+// ---------------------------------------------------------------------------
+// 结构化失败 details 透传（Task #43）：background 通过 failOperation 的第
+// 四个参数 detailsJson 附带结构化详情（目前唯一用例是 drafts.send.confirm
+// 失败时的 operationId，替代此前"拼进 errorMessage 文本、调用方 regex 解析"
+// 的隐式协议）。这里直接驱动真实 api.js 的 failOperation/sanitizeMailErrorDetails，
+// 不经过任何 background 业务 handler——background 侧已经在
+// test/mail-write-integration.test.mjs 的 send-failed 用例里覆盖过一次
+// "真的会正确序列化 details"，这里覆盖的是 api.js 这一侧独立的 allowlist
+// 校验本身，两层互不信任对方已经做对。
+// ---------------------------------------------------------------------------
+
+test("failOperation 携带合法 detailsJson（{operationId}）时，HTTP error envelope 的 error.details 原样透传", async (t) => {
+  await withHarness(t, async (harness) => {
+    const identity = makeIdentity();
+    await pair(harness, identity);
+    await grantMailCapabilities(harness, ["mail.read.v1"]);
+    const operationId = `op_${"a".repeat(16)}`;
+    harness.api.onOperation.addListener(async (token) => {
+      await harness.api.failOperation(token, "E_INTERNAL", "外发失败：请通过 operations get 查询最新状态", JSON.stringify({ operationId }));
+    });
+
+    const result = await handle(harness, buildRequest(harness, { method: "POST", path: ACCOUNTS_LIST_PATH, bodyText: "{}", identity }));
+    assert.equal(result.status, 500);
+    // result.details 是在 vm 沙箱 realm 里创建的对象，跨 realm 的 deepEqual
+    // 会因为原型不是同一个 Object.prototype 报 "same structure but not
+    // reference-equal"——JSON 往返把它变回当前 realm 的纯对象再比较。
+    assert.deepEqual(JSON.parse(JSON.stringify(result.details)), { operationId });
+  });
+});
+
+test("failOperation 的 detailsJson 携带 allowlist 之外的字段（token/nonce/path/subject/body）时，全部字段一律被丢弃，只保留合法的 operationId", async (t) => {
+  await withHarness(t, async (harness) => {
+    const identity = makeIdentity();
+    await pair(harness, identity);
+    await grantMailCapabilities(harness, ["mail.read.v1"]);
+    const operationId = `op_${"b".repeat(16)}`;
+    const malicious = {
+      operationId,
+      token: "tok_should_never_leak",
+      nonce: "canary-nonce-value",
+      path: "/Users/victim/.ssh/id_ed25519",
+      subject: "机密主题",
+      body: "机密正文内容",
+      address: "victim@example.com",
+    };
+    harness.api.onOperation.addListener(async (token) => {
+      await harness.api.failOperation(token, "E_INTERNAL", "外发失败", JSON.stringify(malicious));
+    });
+
+    const result = await handle(harness, buildRequest(harness, { method: "POST", path: ACCOUNTS_LIST_PATH, bodyText: "{}", identity }));
+    assert.deepEqual(JSON.parse(JSON.stringify(result.details)), { operationId }, "只应保留 operationId，其余全部字段都必须被丢弃");
+    const raw = JSON.stringify(result.details);
+    for (const canary of ["tok_should_never_leak", "canary-nonce-value", "id_ed25519", "机密主题", "机密正文内容", "victim@example.com"]) {
+      assert.doesNotMatch(raw, new RegExp(canary.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")), `details 不应包含 canary：${canary}`);
+    }
+  });
+});
+
+test("failOperation 的 detailsJson 格式不合法（非 JSON/是数组/operationId 格式不符/缺省）时，error.details 整体缺失，不影响 code/message 正常返回", async (t) => {
+  await withHarness(t, async (harness) => {
+    const identity = makeIdentity();
+    await pair(harness, identity);
+    await grantMailCapabilities(harness, ["mail.read.v1"]);
+
+    const cases = [
+      "not valid json{{{",
+      JSON.stringify(["array", "not", "object"]),
+      JSON.stringify({ operationId: "not-a-valid-op-ref" }),
+      JSON.stringify({ operationId: 12345 }),
+      JSON.stringify(null),
+      undefined,
+    ];
+    for (const detailsJson of cases) {
+      const listener = async (token) => { await harness.api.failOperation(token, "E_INTERNAL", "外发失败", detailsJson); };
+      harness.api.onOperation.addListener(listener);
+      const result = await handle(harness, buildRequest(harness, { method: "POST", path: ACCOUNTS_LIST_PATH, bodyText: "{}", identity }));
+      assert.equal(result.status, 500, `detailsJson=${detailsJson}`);
+      assert.equal(result.code, "E_INTERNAL", `detailsJson=${detailsJson}`);
+      assert.equal(result.details, undefined, `不合法 detailsJson 应整体丢弃 details：${detailsJson}`);
+      harness.api.onOperation.removeListener(listener);
+    }
+  });
+});
+
 test("revokePairing 立即让撤销前发起、仍在等待的 operation 失败，不悬挂到 deadline 才超时", async (t) => {
   await withHarness(t, async (harness) => {
     const identity = makeIdentity();

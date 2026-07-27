@@ -37,7 +37,8 @@ interface ThunderbirdSkillBridgeApi {
   /** api.js 内 MAIL_ROUTES 静态表的 route id 列表；background 用它自检本地 handler 登记表是否漂移。 */
   listMailRoutes(): Promise<string[]>;
   respondToOperation(token: string, resultJson: string): Promise<void>;
-  failOperation(token: string, errorCode: string, errorMessage: string): Promise<void>;
+  /** detailsJson（Task #43）：可选的结构化失败详情，JSON 字符串形式（api.js 侧独立 allowlist 校验，非法/未知字段静默丢弃）。 */
+  failOperation(token: string, errorCode: string, errorMessage: string, detailsJson?: string): Promise<void>;
   onOperation: {
     addListener(listener: OperationListener): void;
     removeListener(listener: OperationListener): void;

@@ -281,7 +281,12 @@ export async function handle(harness, request) {
     await harness.dispatch(request, response);
     return { ok: true, status: response.captured.status ?? 200, body: response.captured.body ? response.json() : null, response };
   } catch (error) {
-    return { ok: false, status: error.status, code: error.code, message: error.message, response };
+    // details（Task #43）：邮件 route dispatch 失败时，真实 api.js 已经在
+    // reject()/errorWithStatus() 里把它挂到抛出的 error 对象上；这里原样
+    // 透传，不做额外处理——夹具的职责是如实反映 api.js 内部真实抛出的错误
+    // 形状，allowlist 校验本身发生在 api.js 内部（sanitizeMailErrorDetails），
+    // 已经在这个 error.details 上生效过了。
+    return { ok: false, status: error.status, code: error.code, message: error.message, details: error.details, response };
   }
 }
 

@@ -1,7 +1,7 @@
 import { request } from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { PAIRING_EPOCH_PATTERN, type InstanceDescriptor } from "./discovery.js";
-import { ERROR_CODES, type ErrorCode } from "./contracts/envelope.js";
+import { ERROR_CODES, type ErrorCode, type MailErrorDetails } from "./contracts/envelope.js";
 import { PUBLIC_KEY_ALGORITHM, signRequest, type PairingIdentity, type SigningIdentity } from "./auth.js";
 import { MAIL_CAPABILITIES, type MailRouteSpec } from "./contracts/routes.js";
 
@@ -43,6 +43,8 @@ export class TransportError extends Error {
     readonly code: ErrorCode,
     message: string,
     readonly retryable = false,
+    /** Task #43：结构化失败详情（目前只有 operationId），来自扩展侧 HTTP error envelope 的 `error.details`；已在 parseMailRouteErrorBody 里做过窄类型 sanitize，不是原样透传的任意对象。 */
+    readonly details?: MailErrorDetails,
   ) {
     super(message);
   }
@@ -280,7 +282,25 @@ function isKnownErrorCode(value: unknown): value is ErrorCode {
   return typeof value === "string" && KNOWN_ERROR_CODES.has(value);
 }
 
-function parseMailRouteErrorBody(response: ApiResponse): { code: ErrorCode; message: string } | undefined {
+/** 与 extension/src/background.ts 的 OPERATION_ID_PATTERN 是同一份契约的镜像；operationId 是目前 MailErrorDetails 唯一的合法字段。 */
+const OPERATION_ID_PATTERN = /^op_[A-Za-z0-9_-]{16,128}$/;
+
+/**
+ * details 的窄类型 sanitizer（Task #43）：只接受自有属性 `operationId`，
+ * 且值必须匹配 opaque ref 格式；任何其他键（无论是未知字段、看似无害的
+ * string/number/boolean，还是嵌套对象/数组）一律静默丢弃，不做"尽量保留"
+ * 式的宽松透传。格式不符时整个 details 视为不存在，不影响 code/message
+ * 的正常解析——details 本身是锦上添花的补充信息，不是协议必需部分。
+ */
+function sanitizeMailErrorDetails(value: unknown): MailErrorDetails | undefined {
+  if (!isRecord(value)) return undefined;
+  if (!Object.hasOwn(value, "operationId")) return undefined;
+  const operationId = value.operationId;
+  if (typeof operationId !== "string" || !OPERATION_ID_PATTERN.test(operationId)) return undefined;
+  return { operationId };
+}
+
+function parseMailRouteErrorBody(response: ApiResponse): { code: ErrorCode; message: string; details?: MailErrorDetails } | undefined {
   let value: unknown;
   try { value = parseJsonResponse(response); } catch { return undefined; }
   if (!isRecord(value) || Object.keys(value).length !== 1 || !isRecord(value.error)) return undefined;
@@ -289,7 +309,8 @@ function parseMailRouteErrorBody(response: ApiResponse): { code: ErrorCode; mess
   if (!keys.has("code") || !keys.has("message")) return undefined;
   for (const key of keys) if (key !== "code" && key !== "message" && key !== "details") return undefined;
   if (!isKnownErrorCode(errorRecord.code) || typeof errorRecord.message !== "string") return undefined;
-  return { code: errorRecord.code, message: errorRecord.message };
+  const details = keys.has("details") ? sanitizeMailErrorDetails(errorRecord.details) : undefined;
+  return { code: errorRecord.code, message: errorRecord.message, ...(details ? { details } : {}) };
 }
 
 /**
@@ -307,7 +328,7 @@ export async function callMailRoute(
   const response = await requestApi({ descriptor, method: route.method, path: route.path, body, timeoutMs, identity });
   if (response.statusCode === 200) return parseJsonResponse(response);
   const parsed = parseMailRouteErrorBody(response);
-  if (parsed) throw new TransportError(parsed.code, parsed.message, parsed.code === "E_PAIRING_CHANGED");
+  if (parsed) throw new TransportError(parsed.code, parsed.message, parsed.code === "E_PAIRING_CHANGED", parsed.details);
   if (response.statusCode === 401 || response.statusCode === 403) throw new TransportError("E_AUTH", "本地会话认证失败");
   if (response.statusCode === 404) throw new TransportError("E_NOT_FOUND", "对象不存在，或不属于当前实例/配对范围");
   if (response.statusCode === 426) throw new TransportError("E_VERSION_MISMATCH", "CLI 与 Thunderbird 扩展版本不兼容；请升级到匹配的一对版本");

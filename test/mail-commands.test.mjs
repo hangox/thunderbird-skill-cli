@@ -193,6 +193,61 @@ test("draft send：--prepare 与 --confirm 必须二选一，且分别命中对�
   assert.deepEqual(confirmData.echo, { confirmationId: "confirm_test001", draftRevision: "sha256:cc", confirmedAt: "2026-07-27T00:00:00Z", draftRef: "draft_1234567890ab" });
 });
 
+test("draft send --confirm 失败时，error.details.operationId 端到端透传到 CLI 最终 JSON 输出（Task #43，不依赖 message 文本解析）", { skip: !isDarwin }, async (t) => {
+  const clientId = await withIdentity(t);
+  const operationId = `op_${"e".repeat(16)}`;
+  const fixture = await startFakeMailApi(t, {
+    routeHandlers: {
+      // 模拟扩展侧 extension/bridge/api.js 的真实 HTTP error envelope 形状：
+      // { error: { code, message, details } }——message 只是人类可读文案，
+      // 不含任何可解析的 operationId 前缀。
+      "/v1/mail/drafts.send.confirm": () => ({
+        status: 500,
+        body: { error: { code: "E_INTERNAL", message: "外发失败：请通过 operations get 查询最新状态，不要自动重试", details: { operationId } } },
+      }),
+    },
+  });
+  const env = { ...process.env, THUNDERBIRD_SKILL_RUNTIME_DIR: fixture.root };
+  const confirmFile = await writeInputFile(t, { confirmationId: "confirm_test001", draftRevision: "sha256:cc" });
+
+  await assert.rejects(run(["--client", clientId, "draft", "send", "draft_1234567890ab", "--confirm", confirmFile], env), (error) => {
+    const envelope = JSON.parse(error.stdout);
+    assert.equal(error.code, 10, "E_INTERNAL 应映射为 EXIT.INTERNAL=10");
+    assert.equal(envelope.error.code, "E_INTERNAL");
+    assert.doesNotMatch(envelope.error.message, /op_[A-Za-z0-9_-]+/, "message 不应再包含可解析的 operationId");
+    assert.deepEqual(envelope.error.details, { operationId }, "operationId 必须原样出现在结构化 details 里，而不是需要从 message 里正则提取");
+    return true;
+  });
+});
+
+test("扩展侧 error.details 携带 allowlist 之外的额外字段时，CLI 端到端原样透传（details 的 allowlist 校验发生在扩展侧，CLI 层不重新过滤/也不因此拒绝整条响应）", { skip: !isDarwin }, async (t) => {
+  // 这条测试反过来验证 CLI 层的宽容边界：它不假设自己是 details 的 allowlist
+  // 校验方（那是 extension/bridge/api.js 的职责，见 test/mail-operations.test.mjs），
+  // 只要求 details 是一个合法的纯 JSON 对象就原样交给调用方；这里刻意用一个
+  // "假设扩展侧 allowlist 出了 bug、真的泄漏了一个额外字段"的场景，证明这不
+  // 会导致 CLI 崩溃或整条 details 被吞掉——CLI 层不是这个 canary 的最后一道
+  // 防线（那道防线在扩展侧的独立测试里），但也不能因为格式意外就丢失合法的
+  // operationId。
+  const clientId = await withIdentity(t);
+  const operationId = `op_${"f".repeat(16)}`;
+  const fixture = await startFakeMailApi(t, {
+    routeHandlers: {
+      "/v1/mail/drafts.send.confirm": () => ({
+        status: 500,
+        body: { error: { code: "E_INTERNAL", message: "外发失败", details: { operationId, unexpectedExtraField: "should still parse fine" } } },
+      }),
+    },
+  });
+  const env = { ...process.env, THUNDERBIRD_SKILL_RUNTIME_DIR: fixture.root };
+  const confirmFile = await writeInputFile(t, { confirmationId: "confirm_test001", draftRevision: "sha256:cc" });
+
+  await assert.rejects(run(["--client", clientId, "draft", "send", "draft_1234567890ab", "--confirm", confirmFile], env), (error) => {
+    const envelope = JSON.parse(error.stdout);
+    assert.equal(envelope.error.details.operationId, operationId);
+    return true;
+  });
+});
+
 test("operations get：位置引用映射为 operationId", { skip: !isDarwin }, async (t) => {
   const clientId = await withIdentity(t);
   const fixture = await startFakeMailApi(t, {

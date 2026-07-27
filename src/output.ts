@@ -5,7 +5,7 @@
 // 命令特定逻辑，是纯粹的"结果 -> 输出"转换层，供 cli.ts 的全部命令
 // （现有 status/doctor/setup/xpi 与新挂载的邮件命令）共用。
 import { COMMANDS } from "./contracts/commands.js";
-import { CLI_SCHEMA_VERSION, createRequestId, type ErrorCode, type ErrorEnvelope, type SuccessEnvelope } from "./contracts/envelope.js";
+import { CLI_SCHEMA_VERSION, createRequestId, type ErrorCode, type ErrorEnvelope, type MailErrorDetails, type SuccessEnvelope } from "./contracts/envelope.js";
 
 export const EXIT = { OK: 0, USAGE: 2, NOT_READY: 3, AUTH: 4, POLICY: 5, NOT_FOUND: 6, TEMPORARY: 7, INTERNAL: 10 } as const;
 
@@ -19,7 +19,7 @@ export function exitFor(code: ErrorCode): number {
   return EXIT.INTERNAL;
 }
 
-export function emitError(command: string, code: ErrorCode, message: string, retryable: boolean, human: boolean, details?: Record<string, unknown>): never {
+export function emitError(command: string, code: ErrorCode, message: string, retryable: boolean, human: boolean, details?: MailErrorDetails): never {
   if (human) process.stderr.write(`${message}\n`);
   else {
     const payload: ErrorEnvelope = { schemaVersion: CLI_SCHEMA_VERSION, ok: false, command, requestId: createRequestId(), error: { code, message, retryable, ...(details ? { details } : {}) } };

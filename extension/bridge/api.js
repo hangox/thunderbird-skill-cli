@@ -53,8 +53,12 @@ function constantTimeEqual(left, right) {
   return difference === 0;
 }
 
-function errorWithStatus(status, message, code = "E_REJECTED") {
-  return Object.assign(new Error(message), { status, code });
+// details（Task #43，可选）：结构化失败详情，随 HTTP error envelope 一起
+// 透传给 CLI（见 reject()）。绝大多数调用点不传，只有邮件 route 的
+// failOperation 路径（见 operationChannel.fail）会带上一份已经独立校验过
+// allowlist 的对象。
+function errorWithStatus(status, message, code = "E_REJECTED", details) {
+  return Object.assign(new Error(message), { status, code, ...(details ? { details } : {}) });
 }
 
 function isWouldBlock(error) {
@@ -421,9 +425,9 @@ function createLoopbackServer(preflight, dispatch) {
         try { this.output.asyncWait(this, 0, 0, Services.tm.mainThread); }
         catch (error) { this.abort(error?.result || Cr.NS_ERROR_ABORT); }
       },
-      reject(status, message, code = "E_REJECTED") {
+      reject(status, message, code = "E_REJECTED", details) {
         if (this.closed || this.responseBuffer) return;
-        writeJson(createResponse(this), status, { error: { code, message } });
+        writeJson(createResponse(this), status, { error: { code, message, ...(details ? { details } : {}) } });
       },
       async consume() {
         if (this.closed || this.processing) return;
@@ -457,7 +461,11 @@ function createLoopbackServer(preflight, dispatch) {
           ensureRequestActive(this.request);
           await dispatch(this.request, createResponse(this));
         } catch (error) {
-          if (!this.closed) this.reject(error.status || 400, error.message || "请求被拒绝", error.code);
+          // error.details（Task #43）：邮件 route dispatch 失败时可能携带一份
+          // 已经过 operationChannel.fail() 独立 allowlist 校验的结构化详情；
+          // 其余抛错路径（header/body 解析、preflight）没有这个字段，透传
+          // undefined 是安全的默认行为。
+          if (!this.closed) this.reject(error.status || 400, error.message || "请求被拒绝", error.code, error.details);
         }
       },
       onInputStreamReady(stream) {
@@ -607,6 +615,29 @@ const MAIL_ROUTE_ERROR_STATUS = {
   E_INTERNAL: 500,
 };
 
+// 结构化失败 details 的平台层 allowlist（Task #43）。background 侧的
+// MailAdapterError 已经在源头（extension/src/mail/state.ts）做过一次
+// allowlist 校验，但 api.js 是特权边界——不信任 detailsJson 这个字符串
+// "既然是 background 发来的就一定干净"，这里独立再校验一遍（与 audit.ts 的
+// sink 不信任调用方类型标注是同一设计原则）。目前只有 operationId 这一个
+// 已知安全字段；新增字段必须显式在这里加校验函数，不能靠"另一侧写对了就行"。
+const MAIL_ERROR_DETAILS_VALIDATORS = {
+  operationId: (value) => typeof value === "string" && /^op_[A-Za-z0-9_-]{16,128}$/.test(value),
+};
+
+/** 把 background 传来的 detailsJson 解析并按 allowlist 过滤；解析失败/不是纯对象/值不合法一律丢弃该字段，绝不因为畸形 details 让整个响应失败。 */
+function sanitizeMailErrorDetails(detailsJson) {
+  if (typeof detailsJson !== "string" || detailsJson.length === 0) return undefined;
+  let parsed;
+  try { parsed = JSON.parse(detailsJson); } catch { return undefined; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const out = {};
+  for (const [key, isValid] of Object.entries(MAIL_ERROR_DETAILS_VALIDATORS)) {
+    if (Object.hasOwn(parsed, key) && isValid(parsed[key])) out[key] = parsed[key];
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 // 只在缺少 ExtensionCommon.EventManager 的环境（当前测试夹具）下生效的等价
 // 实现：register(fire) 在监听者数量 0→1 时调用一次并返回 unregister，
 // 语义与真实 EventManager 完全一致，因此 createOperationChannel 的其余逻辑
@@ -701,11 +732,12 @@ function createOperationChannel(context) {
         entry.resolve(value);
       });
     },
-    fail(token, errorCode, errorMessage) {
+    fail(token, errorCode, errorMessage, detailsJson) {
       return settle(token, (entry) => {
         const status = Object.hasOwn(MAIL_ROUTE_ERROR_STATUS, errorCode) ? MAIL_ROUTE_ERROR_STATUS[errorCode] : 500;
         const code = Object.hasOwn(MAIL_ROUTE_ERROR_STATUS, errorCode) ? errorCode : "E_INTERNAL";
-        entry.reject(errorWithStatus(status, typeof errorMessage === "string" && errorMessage ? errorMessage : "该邮件能力处理失败", code));
+        const details = sanitizeMailErrorDetails(detailsJson);
+        entry.reject(errorWithStatus(status, typeof errorMessage === "string" && errorMessage ? errorMessage : "该邮件能力处理失败", code, details));
       });
     },
     clear(message) {
@@ -1122,7 +1154,7 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
         // 调用两者之一，唤醒 dispatch() 里挂起的 Promise；找不到对应 token
         // （已超时/已响应过）时静默忽略，不对 background 暴露内部时序细节。
         respondToOperation: async (token, resultJson) => { state.operationChannel.respond(token, resultJson); },
-        failOperation: async (token, errorCode, errorMessage) => { state.operationChannel.fail(token, errorCode, errorMessage); },
+        failOperation: async (token, errorCode, errorMessage, detailsJson) => { state.operationChannel.fail(token, errorCode, errorMessage, detailsJson); },
         onOperation: state.operationChannel.event,
         // 配对撤销（等价于 epoch 推进）时触发，background 收到后必须清空
         // 其持有的 mailRefStore；参见 revokePairing 里的 fire() 调用。

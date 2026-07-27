@@ -240,7 +240,7 @@ function createSandbox() {
         onOperation: { addListener: (fn) => { operationListener = fn; } },
         onPairingRevoked: { addListener: () => {} },
         respondToOperation: async (token, resultJson) => { responded.push({ token, result: JSON.parse(resultJson) }); },
-        failOperation: async (token, errorCode, errorMessage) => { failed.push({ token, errorCode, errorMessage }); },
+        failOperation: async (token, errorCode, errorMessage, detailsJson) => { failed.push({ token, errorCode, errorMessage, detailsJson }); },
       },
     },
   };
@@ -262,7 +262,16 @@ function makeCaller(listener, responded, failed) {
     const token = `tok_${routeId}_${Math.random()}`;
     const capability = routeId.startsWith("drafts.send") ? "mail.send-confirmed.v1" : routeId.startsWith("drafts.") ? "draft.write.v1" : "mail.reversible.v1";
     await listener(token, routeId, capability, JSON.stringify(body), clientId, epoch);
-    if (failed.length > 0) return { ok: false, errorCode: failed[0].errorCode, errorMessage: failed[0].errorMessage };
+    if (failed.length > 0) {
+      // Task #43：background.ts 的 handleOperation 把结构化 details 序列化成
+      // JSON 字符串传给 failOperation；这里解析回对象供测试断言，镜像真实
+      // api.js 侧 sanitizeMailErrorDetails() 会做的事（这个 sandbox mock 不
+      // 做 allowlist 校验，因为要测的是 background.ts 这一端有没有正确
+      // 序列化，allowlist 本身的独立校验由 test/mail-operations.test.mjs
+      // 针对真实 api.js 覆盖）。
+      const details = failed[0].detailsJson ? JSON.parse(failed[0].detailsJson) : undefined;
+      return { ok: false, errorCode: failed[0].errorCode, errorMessage: failed[0].errorMessage, errorDetails: details };
+    }
     return { ok: true, result: responded[0].result };
   };
 }
@@ -664,14 +673,14 @@ test("draft send：sendMessage 真实失败时返回 E_INTERNAL 且 operations g
   assert.equal(confirmed.ok, false);
   assert.equal(confirmed.errorCode, "E_INTERNAL");
 
+  // Task #43：operationId 现在通过结构化 error.details 透传（不再是
+  // message 文本里的隐式协议），message 只做人类可读文案，不含 operationId。
+  assert.doesNotMatch(confirmed.errorMessage, /op_[A-Za-z0-9_-]+/, "message 不应再包含可解析的 operationId，那是 details 的职责");
+  assert.match(confirmed.errorDetails?.operationId ?? "", /^op_[A-Za-z0-9_-]{16,128}$/, `details.operationId 应是合法 op ref：${JSON.stringify(confirmed.errorDetails)}`);
+
   // 标题承诺了"operations get 显示 failed"，这里必须真的调用它验证，而不是
-  // 只停在 confirm 本身的错误码上。operationId 目前只能从错误消息文本里
-  // 提取（send.ts 没有结构化 details 通道，见其内部注释）——这个提取只用于
-  // 测试内部验证"确实存在且状态正确"，不代表这个文本格式是稳定协议，真实
-  // 调用方不应依赖这种解析方式。
-  const operationIdMatch = /operationId=(op_[A-Za-z0-9_-]+)/.exec(confirmed.errorMessage);
-  assert.ok(operationIdMatch, `错误消息应包含可解析的 operationId：${confirmed.errorMessage}`);
-  const opsRes = await call("operations.get", { operationId: operationIdMatch[1] });
+  // 只停在 confirm 本身的错误码上。
+  const opsRes = await call("operations.get", { operationId: confirmed.errorDetails.operationId });
   assert.equal(opsRes.ok, true, JSON.stringify(opsRes));
   assert.equal(opsRes.result.state, "failed");
   assert.equal(opsRes.result.undoable, false);

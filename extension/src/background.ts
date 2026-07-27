@@ -125,6 +125,39 @@ function extractErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "未知内部错误";
 }
 
+// 与 src/contracts/envelope.ts 的 MailErrorDetails 是同一份契约的镜像
+// （background.ts 跨 tsconfig rootDir，无法直接 import src/contracts/*，
+// 按仓库既有约定——见 refs.ts/schema.ts 顶部注释——手工镜像并靠测试保持
+// 同步）：details 目前唯一的合法字段是 operationId，值必须匹配 opaque ref
+// 格式。修改任一处都必须同步另一处。
+interface MailErrorDetails {
+  readonly operationId?: string;
+}
+
+/** 与 src/transport.ts 的同名常量是同一份契约的镜像。 */
+const OPERATION_ID_PATTERN = /^op_[A-Za-z0-9_-]{16,128}$/;
+
+/**
+ * Task #43：结构化透传失败 details（例如 drafts.send.confirm 失败时的
+ * operationId），替代此前"把 operationId 拼进 message 文本、调用方 regex
+ * 解析"的隐式协议。`MailAdapterError` 已经在源头（state.ts）做过一次
+ * allowlist 校验，这里是第二道独立防线——不信任"上游应该已经处理好了"这个
+ * 假设：只接受自有属性 `operationId` 且值匹配 opaque ref 格式；任何其他键
+ * （未知字段、看似无害的 string/number/boolean、嵌套对象/数组）一律静默
+ * 丢弃，不做"尽量保留"式的宽松透传，防止未来某次改动不小心把整个
+ * body/context 对象挂到 details 上时被这里原样放行。
+ */
+function extractErrorDetails(error: unknown): MailErrorDetails | undefined {
+  if (!error || typeof error !== "object" || !("details" in error)) return undefined;
+  const details = (error as { details: unknown }).details;
+  if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
+  const record = details as Record<string, unknown>;
+  if (!Object.hasOwn(record, "operationId")) return undefined;
+  const operationId = record.operationId;
+  if (typeof operationId !== "string" || !OPERATION_ID_PATTERN.test(operationId)) return undefined;
+  return { operationId };
+}
+
 /**
  * api.js 通过 onOperation 转发已认证/已过 capability 门禁的邮件 route
  * 请求，随事件一起携带 clientId/pairingEpoch（取自 api.js 已验证的
@@ -150,7 +183,8 @@ async function handleOperation(token: string, routeId: string, capability: strin
     const result = await handler(body, { capability, clientId, pairingEpoch });
     await browser.thunderbirdSkillBridge.respondToOperation(token, JSON.stringify(result));
   } catch (error) {
-    await browser.thunderbirdSkillBridge.failOperation(token, extractErrorCode(error), extractErrorMessage(error));
+    const details = extractErrorDetails(error);
+    await browser.thunderbirdSkillBridge.failOperation(token, extractErrorCode(error), extractErrorMessage(error), details ? JSON.stringify(details) : undefined);
   }
 }
 

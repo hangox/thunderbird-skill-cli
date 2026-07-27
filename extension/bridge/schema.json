@@ -64,9 +64,10 @@
         "parameters": [
           { "name": "token", "type": "string" },
           { "name": "errorCode", "type": "string" },
-          { "name": "errorMessage", "type": "string" }
+          { "name": "errorMessage", "type": "string" },
+          { "name": "detailsJson", "type": "string", "optional": true }
         ],
-        "description": "background 判定某个 operation 失败（含未实现）时调用，唤醒 api.js 中挂起的对应请求并以该错误码/信息响应 CLI。"
+        "description": "background 判定某个 operation 失败（含未实现）时调用，唤醒 api.js 中挂起的对应请求并以该错误码/信息响应 CLI。detailsJson（Task #43，可选）是结构化失败详情的 JSON 字符串（例如 drafts.send.confirm 失败时的 operationId），供调用方程序化消费而不必解析 errorMessage 文案；api.js 会独立按固定 allowlist 校验，未知/非法字段静默丢弃。"
       },
       {
         "name": "setMailCapabilities",

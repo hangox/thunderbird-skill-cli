@@ -509,7 +509,7 @@ async function main(): Promise<void> {
     return emitError(command, "E_NOT_IMPLEMENTED", "该命令本轮未纳入交付范围或邮件适配层尚未接线", false, options.human);
   } catch (error) {
     if (error instanceof DiscoveryError) return emitError(command, error.code, error.message, false, options.human);
-    if (error instanceof TransportError) return emitError(command, error.code, error.message, error.retryable, options.human);
+    if (error instanceof TransportError) return emitError(command, error.code, error.message, error.retryable, options.human, error.details);
     return emitError(command, "E_INTERNAL", "内部错误", false, options.human);
   }
 }

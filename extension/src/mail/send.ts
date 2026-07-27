@@ -169,16 +169,11 @@ export async function draftsSendConfirm(body: unknown, context: MailAdapterConte
   } catch (error) {
     recordOperation(operationId, "drafts.send", [parsed.draftRef], context, "failed");
     recordAudit({ routeId: "drafts.send.confirm", capability: context.capability, clientId: context.clientId, outcome: "error", reason: "send-failed" });
-    // Task #42 收敛：错误消息必须真的带上 operationId，否则"请通过 operations
-    // get 查询最新状态"这句提示没有任何东西可查——MailAdapterError 目前只有
-    // code/message 两个字段（没有结构化 details 透传通道，那需要改
-    // background.ts/api.js 的 failOperation 签名，不在本任务改动范围内）。
-    // 这里把 operationId 写进 message 纯粹是给人看的诊断信息（供用户/Skill
-    // 复制粘贴去手动查询），不是稳定的机器可解析协议——message 文案措辞
-    // 未来可以自由调整，不构成对调用方的兼容性承诺；真正需要程序化拿到
-    // operationId 的场景，应该等结构化 details 通道落地后再由 CLI/平台层
-    // 消费，而不是依赖 message 里的固定前缀。
-    throw new MailAdapterError("E_INTERNAL", `外发失败（operationId=${operationId}）：请通过 operations get 查询最新状态，不要自动重试`);
+    // Task #43 收敛：operationId 通过结构化 details 透传（见 state.ts 的
+    // MailAdapterError/MailErrorDetails），message 只做人类可读文案，不再
+    // 是"文案里藏着一个隐式协议、谁 regex 谁绑定"的设计——调用方需要程序化
+    // 拿到 operationId 时读 error.details.operationId，不应该解析 message。
+    throw new MailAdapterError("E_INTERNAL", "外发失败：请通过 operations get 查询最新状态，不要自动重试", { operationId });
   }
 
   recordOperation(operationId, "drafts.send", [parsed.draftRef], context, "sent");

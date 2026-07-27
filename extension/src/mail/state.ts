@@ -9,7 +9,7 @@
 // 因此这份单例被放进一个不属于任何单一能力域的独立文件，供所有 mail/*.ts
 // adapter 共同 import，只新增文件、不修改任何人已占的文件。
 //
-import { MAX_REF_TTL_MS, RefStore, type RandomTokenSource, type RefKind } from "../refs.js";
+import { MAX_REF_TTL_MS, RefStore, refPattern, type RandomTokenSource, type RefKind } from "../refs.js";
 
 // TTL 约定：`RefStore.issue()` 硬性拒绝任何超过 `MAX_REF_TTL_MS`（30 分钟，见
 // refs.ts）的 ttlMs，因此这里全部 ref kind 的 TTL 都以它为上限——账号/文件夹/
@@ -72,11 +72,38 @@ function resolveContext(context: MailAdapterContext): { clientId: string; pairin
   return { clientId: context.clientId, pairingEpoch: context.pairingEpoch, nowMs: Date.now() };
 }
 
+// Task #43 收敛：结构化失败 details 的封闭 allowlist。此前 send.ts 把
+// operationId 拼进 message 文本（"外发失败（operationId=xxx）：..."）让调用方
+// 去 regex 提取——这是一个隐式协议，message 文案本该可以自由调整而不构成
+// 兼容性承诺，但只要有代码在 regex 它，文案就事实上被冻结了。现在改为一个
+// 独立的、结构化的 details 通道，message 只做人类可读文案。
+//
+// 与 audit.ts 的 allowlist 同一设计原则：只允许固定的已知安全键，值必须是
+// 能通过格式校验的字符串（这里复用 refs.ts 的 refPattern，保证只有真正
+// 形如 op_xxx 的 opaque ref 才会被放行，不是任意字符串）——不接受嵌套对象/
+// 数组，新增字段必须显式加到这里。`MailAdapterError` 在构造时就做这层
+// 校验（而不是留给调用方自觉），因此即使某次改动手滑传入了不合法的值，
+// 这里也会静默丢弃对应字段而不是把畸形值带到 background.ts/api.js。
+export interface MailErrorDetails {
+  /** operations get 可查询的 operation id；目前唯一用例是 drafts.send.confirm 失败时告知调用方去哪查询最新状态。 */
+  readonly operationId?: string;
+}
+
+function sanitizeMailErrorDetails(details: MailErrorDetails | undefined): MailErrorDetails | undefined {
+  if (!details) return undefined;
+  if (typeof details.operationId === "string" && refPattern("op").test(details.operationId)) {
+    return { operationId: details.operationId };
+  }
+  return undefined;
+}
+
 /**
  * handler 侧统一的业务错误：携带 `src/contracts/envelope.ts` 里冻结的
  * `ErrorCode` 子集。`background.ts` 的 `handleOperation` 会优先读取
  * `error.code`（duck-typing，不要求 `instanceof MailAdapterError`）透传给
- * CLI，而不是无条件折叠成 `E_INTERNAL`。
+ * CLI，而不是无条件折叠成 `E_INTERNAL`；`error.details`（若存在）同样会被
+ * 结构化透传（见 background.ts 的 `extractErrorDetails`），不再需要从
+ * message 文本里解析。
  *
  * `E_CONFIRMATION_REQUIRED`（Task #30/mail-write 补充）：draft send confirm
  * 阶段专用——确认不存在/已消费/草稿内容已变化时用它，与 undo/attachment 等
@@ -84,12 +111,16 @@ function resolveContext(context: MailAdapterContext): { clientId: string; pairin
  * 后者是"对象不存在"，见 mail/send.ts 头部设计说明）。
  */
 export class MailAdapterError extends Error {
+  readonly details?: MailErrorDetails | undefined;
+
   constructor(
     readonly code: "E_VALIDATION" | "E_NOT_FOUND" | "E_POLICY_DENIED" | "E_INTERNAL" | "E_CONFIRMATION_REQUIRED",
     message: string,
+    details?: MailErrorDetails,
   ) {
     super(message);
     this.name = "MailAdapterError";
+    this.details = sanitizeMailErrorDetails(details);
   }
 }
 

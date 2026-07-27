@@ -18,6 +18,8 @@
     .capability-option input { margin-top: 4px; }
     .capability-option .label { font-weight: 600; }
     .capability-option .description { color: #526078; font-size: 14px; }
+    .capability-option-warning { padding: 10px 12px; border: 1px solid #f0c36d; border-radius: 8px; background: #fff9ee; }
+    .capability-option-warning .label { color: #92400e; }
     #capabilities-status { min-height: 1.4em; color: #526078; font-size: 14px; }
   </style>
 </head>
@@ -62,11 +64,11 @@
               <div class="description">创建、更新草稿，或在 Thunderbird 撰写窗口中打开草稿；不包含外发</div>
             </div>
           </div>
-          <div class="capability-option">
+          <div class="capability-option capability-option-warning">
             <input type="checkbox" id="capability-mail-send" value="mail.send-confirmed.v1" disabled>
             <div>
-              <label class="label" for="capability-mail-send">外发确认</label>
-              <div class="description">对已创建草稿执行 prepare/confirm 两阶段确认后发送</div>
+              <label class="label" for="capability-mail-send">外发确认（默认关闭，请单独评估后再勾选）</label>
+              <div class="description">对已创建草稿执行 prepare/confirm 两阶段确认后发送；这是唯一能让邮件真正离开本机的能力，与上面三项分开授予</div>
             </div>
           </div>
         </fieldset>

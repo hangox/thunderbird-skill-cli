@@ -1140,6 +1140,10 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
           // 撤销的 client 持有的全部 opaque ref 必须随之失效，否则旧 client 的
           // ref 会在重新配对的新 client 名下被错误复用。
           if (state.pairing) state.refStore.revokeAllForClient(state.pairing.clientId);
+          // 撤销前发起、仍在等待 background 响应的 operation 必须立即失败，
+          // 不能悬挂到各自的请求 deadline 才超时——那样会让调用方误以为还在
+          // 正常处理，也会让已经不再合法的 client 继续占用挂起槽位。
+          state.operationChannel.clear("配对已被撤销");
           clearPairing();
           state.pairing = null;
           state.pending = null;

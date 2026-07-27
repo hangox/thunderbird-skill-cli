@@ -216,9 +216,21 @@ export function buildRequest(harness, options = {}) {
     bodyText,
     authenticated: null,
     pairingCandidate: null,
-    deadlineAt: Date.now() + 5_000,
+    // 默认 5s，测试超时/无监听者路径时可传 options.deadlineMs 缩短，不必真的等待。
+    deadlineAt: Date.now() + (options.deadlineMs ?? 5_000),
     isCancelled: () => false,
   };
+}
+
+/**
+ * 测试专用 capability 注入：直接调用真实的 thunderbirdSkillBridge.setMailCapabilities
+ * （生产环境里是账号/能力授权 UI 才会调用的同一个特权入口），而不是绕开它的
+ * harness 后门——这样测试练到的是与生产完全相同的写入/持久化路径。
+ * 生产默认 capabilities 仍是 confirmPairing 写入的空集，这个 helper 只是让测试
+ * 不必自己搭一个尚不存在的授权 UI 就能验证已授权路径。
+ */
+export async function grantMailCapabilities(harness, capabilities) {
+  return harness.api.setMailCapabilities(capabilities);
 }
 
 /**

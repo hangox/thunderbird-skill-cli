@@ -163,10 +163,12 @@ thunderbird xpi reveal            # 在 Finder 中定位（仅 macOS）
 发布物是独立的 staging 包（`build/plugin`），与开发仓库分离。
 
 ```bash
-npm run release:check   # check + 全量测试 + 构建 staging + tarball 审计
-npm run validate:plugin # 官方 claude plugin validate 校验两份 manifest
-npm run pack:dry-run    # 查看将要发布的文件清单
+npm run release:check   # check + 全量测试 + 构建 staging + tarball 审计 + plugin/marketplace 校验 + pack dry-run
+npm run validate:plugin # 单独重跑：官方 claude plugin validate 校验两份 manifest
+npm run pack:dry-run    # 单独重跑：查看将要发布的文件清单
 ```
+
+`release:check` 已经把 `validate:plugin`/`pack:dry-run` 纳入同一条链路（Task #45 收敛，此前二者是必须手动分别运行的独立步骤，容易被漏跑）；下面两条只在需要单独排查某一步时才用得上。
 
 ### XPI 安全评审基准
 
@@ -224,6 +226,8 @@ XPI 的字节可复现性依赖 macOS `/usr/bin/zip`，因此必须在 macOS 上
 ### 环境未验证项
 
 UI confirm → receipt → signed status 的**真实 GUI 链路**在本轮未获独立复验：自动化 GUI 核验依赖 Dexter 的 Accessibility 与 Screen Recording 权限，该权限在当前环境不可用。因此该链路标记为**环境未验证（environment-blocked）**，而不是已验证通过。所有非 GUI 环节均由执行级自动化测试覆盖。
+
+同样属于环境未验证的，还有 0.4.0 外发权限链路里依赖真实点击的两步：浏览器原生 `compose.send` 权限弹窗的实际同意/拒绝点击、以及 Thunderbird 扩展 options 页面能力勾选表单的实际点击。这两步的**代码路径**（`browser.permissions.request/remove/contains` 的调用时机与参数、拒绝/撤销后的回滚与 fail-closed 分支）已经用真实 Thunderbird 环境的非 GUI 手段独立验证过：在全新隔离、无账号、无 SMTP 出口的 profile 中，用临时诊断桩直接调用 `browser.compose.beginNew()`/`sendMessage()`，证实了未持有 `compose.send` 时 `browser.compose.sendMessage` 在真实 Thunderbird 里**完全不存在**于 `compose` 命名空间下（`typeof` 结果为 `"undefined"`），调用会抛出 `TypeError: browser.compose.sendMessage is not a function`，且 `permissions.contains()` 如实返回 `false`——这是比"存在但拒绝"更强的物理保证，实验代码已在验证后完整 revert，未留痕迹于任何提交。但**真实点击浏览器权限弹窗本身**、以及**任何真实外发（L2 端到端，含向真实收件地址投递）**均未执行，需要在代码与复核通过后另行获得明确授权才能进行。
 
 ## 已知问题
 

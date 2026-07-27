@@ -7,9 +7,9 @@
 // 完全靠 TypeScript 类型对齐，不经过任何序列化协议。
 //
 // trash 明确只用 `messages.move()` 移进 `specialUse` 含 "trash" 的文件夹，
-// 绝不调用 `messages.delete()`——manifest.json 也确实没有申请
-// `messagesDelete` 权限，这是"不实现永久删除"决策的物理保证（docs/01
-// 附录 A.1）。
+// 绝不调用 `messages.delete()`——`messages.delete()` 官方要求独立的
+// `messagesDelete` 权限，manifest.json 也确实没有申请它，这是"不实现永久
+// 删除"决策的物理保证，不只是本文件里的代码逻辑判断。
 import { recordAudit } from "../audit.js";
 import { assertBatchLimit, idempotencyKey, mailIdempotencyCache, mailRateLimiter } from "../policy.js";
 import type { JsonSchema } from "../schema.js";

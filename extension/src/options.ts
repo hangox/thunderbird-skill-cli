@@ -108,12 +108,22 @@ capabilitiesForm?.addEventListener("submit", async (event) => {
   if (capabilitiesStatus) capabilitiesStatus.textContent = "正在保存…";
   if (applyCapabilitiesButton) applyCapabilitiesButton.disabled = true;
   let permissionDenied = false;
+  // Task #45 收敛：这次提交是否真的在浏览器层"新"拿到了 compose.send 权限——
+  // 只有这种情况下，后续 setMailCapabilities() 失败时才需要回滚浏览器权限；
+  // 如果权限提交前就已经持有（`permissions.request()` 对已持有的权限会
+  // 直接返回 true、不弹窗），保存失败不应该把用户已有的权限一并撤销，那会
+  // 把一次不相关的失败放大成权限丢失。因此必须先用 contains() 拍一次
+  // "提交前基线"，而不是简单地用 request() 的返回值判断"是不是新拿到的"。
+  let acquiredPermissionThisSubmit = false;
   try {
     if (selected.includes(SEND_CAPABILITY)) {
+      const alreadyHeld = await browser.permissions.contains({ permissions: [COMPOSE_SEND_PERMISSION] });
       const granted = await browser.permissions.request({ permissions: [COMPOSE_SEND_PERMISSION] });
       if (!granted) {
         permissionDenied = true;
         selected = selected.filter((value) => value !== SEND_CAPABILITY);
+      } else if (!alreadyHeld) {
+        acquiredPermissionThisSubmit = true;
       }
     } else {
       await browser.permissions.remove({ permissions: [COMPOSE_SEND_PERMISSION] });
@@ -130,6 +140,14 @@ capabilitiesForm?.addEventListener("submit", async (event) => {
       }
     }
   } catch (error) {
+    // 浏览器权限弹窗已经同意（acquiredPermissionThisSubmit=true），但随后
+    // setMailCapabilities() 失败：如果不回滚，会留下"浏览器层已经真实持有
+    // compose.send，但我们自己的 capabilities 记录里从未出现过
+    // mail.send-confirmed.v1"这种悬空授权——用户在 UI 上看到"保存失败"，
+    // 会合理地认为外发能力没有开启，但物理权限其实已经打开了。
+    if (acquiredPermissionThisSubmit) {
+      await browser.permissions.remove({ permissions: [COMPOSE_SEND_PERMISSION] }).catch(() => {});
+    }
     if (capabilitiesStatus) capabilitiesStatus.textContent = `保存失败：${error instanceof Error ? error.message : "未知错误"}`;
     await refresh();
   }

@@ -184,6 +184,15 @@ interface MessageMoveOptions {
  * （例如用户可能绕过 options 页面、直接在 Thunderbird 自己的插件管理页面
  * 撤销权限）。
  *
+ * 实测证据（Task #45）：在全新隔离、无账号、无 SMTP 出口的 Thunderbird
+ * profile 中用临时诊断桩直接调用过 `browser.compose.beginNew()`/
+ * `sendMessage()`（实验代码验证后已完整 revert，不在任何提交里）——未持有
+ * `compose.send` 时，`typeof browser.compose.sendMessage === "undefined"`：
+ * 这个方法在真实 Thunderbird 里根本不存在于 `compose` 命名空间下，调用会
+ * 抛 `TypeError: browser.compose.sendMessage is not a function`，
+ * `permissions.contains()` 如实返回 `false`。也就是说权限缺失表现为"方法
+ * 整体不存在"，而不是"方法存在但拒绝执行"——比后者更强的物理保证。
+ *
  * `ComposeDetails` 字段覆盖范围基于官方文档核对的子集，只列出草稿/外发域
  * 实际用到的字段。
  */

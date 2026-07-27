@@ -1,6 +1,7 @@
-// folders.list —— 列出邮件文件夹树（docs/01 附录 A：只读文件夹枚举只需要
-// accountsRead，不需要 accountsFolders；本轮 manifest 也确实没有申请
-// accountsFolders，见 extension/manifest.json）。
+// folders.list —— 列出邮件文件夹树（官方权限文档：只读文件夹枚举
+// `folders.query/get/getSubFolders` 只需要 accountsRead，不需要
+// accountsFolders——后者只在修改/创建/删除文件夹时才需要；本轮 manifest
+// 也确实没有申请 accountsFolders，见 extension/manifest.json）。
 //
 // 实现说明：Thunderbird 官方文档里 `MailFolder` 是否总是内嵌 `subFolders`
 // 会因版本/调用路径而异（`accounts.get(id, true)` 与 `folders.getSubFolders()`

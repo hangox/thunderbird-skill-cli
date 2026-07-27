@@ -14,9 +14,11 @@ import { MAX_REF_TTL_MS, RefStore, refPattern, type RandomTokenSource, type RefK
 // TTL 约定：`RefStore.issue()` 硬性拒绝任何超过 `MAX_REF_TTL_MS`（30 分钟，见
 // refs.ts）的 ttlMs，因此这里全部 ref kind 的 TTL 都以它为上限——账号/文件夹/
 // 身份 ref 用满这个上限（在扩展进程生命周期内足够稳定，也不需要比这更长）；
-// 消息/附件 ref 与 Thunderbird 原生 `id` 的生命周期语义一致（重启/移动后原生
-// id 本身就会失效，见 docs/01 附录 A.4②），给更短的 TTL；cursor 是分页续取用
-// 的短期状态，给最短的 TTL。
+// 消息/附件 ref 与 Thunderbird 原生 `id` 的生命周期语义一致（官方文档明确
+// messages.MessageHeader.id "does not remain after a restart. Nor does it
+// follow an email that has been moved to a different folder"，重启/移动
+// 后原生 id 本身就会失效），给更短的 TTL；cursor 是分页续取用的短期状态，
+// 给最短的 TTL。
 //
 // draft/op/undo/confirm 四项（Task #30/mail-write 补充）：draft 与账号/文件夹
 // 同档——草稿从 create 到 send confirm 可能跨多次 CLI 调用，需要在扩展进程

@@ -30,7 +30,7 @@
     "validate:plugin": "claude plugin validate ./build/plugin && claude plugin validate .",
     "audit:package": "node scripts/audit-package.ts",
     "pack:dry-run": "cd build/plugin && npm pack --dry-run",
-    "release:check": "npm run check && npm test && npm run build:plugin && npm run audit:package"
+    "release:check": "npm run check && npm test && npm run build:plugin && npm run audit:package && npm run validate:plugin && npm run pack:dry-run"
   },
   "engines": {
     "node": ">=22.0.0"

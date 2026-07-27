@@ -57,11 +57,18 @@ function createFixture() {
     };
   }
 
-  // Task #44：compose.send 是可选权限，request() 的返回值由测试用例通过
-  // setPermissionRequestResult 控制（默认同意），模拟浏览器原生弹窗的用户
-  // 选择。request/remove 各自的调用参数都记录下来，供断言"确实只请求/收回
-  // 了 compose.send 这一个权限字符串，且只在勾选/取消勾选外发能力时才调用"。
-  let permissionRequestResult = true;
+  // Task #44/#45：compose.send 是可选权限，这里模拟一份真实的浏览器权限
+  // 存储状态（`permissionGranted`），而不是让 request()/contains() 各自
+  // 返回互不相关的值——这样才能真实覆盖"提交前已经持有 vs 这次提交才新
+  // 拿到"的区别（Task #45 的回滚逻辑正是依赖这个区分）：
+  // - contains() 如实反映当前持有状态。
+  // - request()：已持有时（真实浏览器行为）直接返回 true、不弹窗；未持有
+  //   时才真的"询问"用户（`nextRequestDecision`，由测试用例通过
+  //   setPermissionRequestResult 设置，模拟用户在原生弹窗里的选择），并把
+  //   持有状态更新为该选择结果。
+  // - remove() 把持有状态清空。
+  let permissionGranted = false;
+  let nextRequestDecision = true;
   const browser = {
     thunderbirdSkillBridge: {
       getState: async () => getStateImpl(),
@@ -70,16 +77,23 @@ function createFixture() {
       setMailCapabilities: async (capabilities) => { calls.setMailCapabilities.push(capabilities); return baseState({ pairingState: "paired", clientId: "client_demo", capabilities }); },
     },
     permissions: {
-      request: async (request) => { calls.permissionsRequest.push(request); return permissionRequestResult; },
-      remove: async (request) => { calls.permissionsRemove.push(request); return true; },
-      contains: async () => permissionRequestResult,
+      request: async (request) => {
+        calls.permissionsRequest.push(request);
+        if (permissionGranted) return true;
+        permissionGranted = nextRequestDecision;
+        return permissionGranted;
+      },
+      remove: async (request) => { calls.permissionsRemove.push(request); permissionGranted = false; return true; },
+      contains: async () => permissionGranted,
     },
   };
 
   return {
     elements, form, checkboxes, document, browser, calls,
     setGetState(impl) { getStateImpl = impl; },
-    setPermissionRequestResult(value) { permissionRequestResult = value; },
+    setPermissionRequestResult(value) { nextRequestDecision = value; },
+    setPermissionGrantedBaseline(value) { permissionGranted = value; },
+    isPermissionGranted: () => permissionGranted,
     baseState,
     submitCapabilitiesForm: async () => { await formSubmitHandler?.({ preventDefault() {} }); },
   };
@@ -190,6 +204,39 @@ test("Task #44：取消勾选外发确认能力并提交时，调用 permissions
   assert.equal(fixture.calls.permissionsRemove.length, 1);
   assert.deepEqual(fixture.calls.permissionsRemove[0], { permissions: ["compose.send"] });
   assert.deepEqual(fixture.calls.setMailCapabilities[0], []);
+});
+
+test("Task #45：勾选外发能力、浏览器同意弹窗、但 setMailCapabilities 保存失败时，必须回滚刚拿到的 compose.send 权限，不留悬空授权", async () => {
+  const fixture = createFixture();
+  fixture.setGetState(async () => fixture.baseState({ pairingState: "paired", clientId: "client_demo", capabilities: [] }));
+  await loadOptions(fixture);
+  fixture.setPermissionGrantedBaseline(false);
+  fixture.setPermissionRequestResult(true);
+  fixture.browser.thunderbirdSkillBridge.setMailCapabilities = async () => { throw new Error("模拟保存失败"); };
+
+  fixture.checkboxes["mail.send-confirmed.v1"].checked = true;
+  await fixture.submitCapabilitiesForm();
+
+  assert.equal(fixture.calls.permissionsRequest.length, 1, "应该真的请求过一次权限");
+  assert.equal(fixture.calls.permissionsRemove.length, 1, "保存失败后必须回滚这次新拿到的权限");
+  assert.deepEqual(fixture.calls.permissionsRemove[0], { permissions: ["compose.send"] });
+  assert.equal(fixture.isPermissionGranted(), false, "回滚后浏览器层不应该再持有 compose.send");
+  assert.match(fixture.elements["#capabilities-status"].textContent, /保存失败：模拟保存失败/);
+});
+
+test("Task #45：提交前已经持有 compose.send 权限，本次 setMailCapabilities 保存失败时，不应该撤销这份已有权限（不放大不相关失败的影响）", async () => {
+  const fixture = createFixture();
+  fixture.setGetState(async () => fixture.baseState({ pairingState: "paired", clientId: "client_demo", capabilities: ["mail.send-confirmed.v1"] }));
+  await loadOptions(fixture);
+  fixture.setPermissionGrantedBaseline(true);
+  fixture.browser.thunderbirdSkillBridge.setMailCapabilities = async () => { throw new Error("模拟保存失败"); };
+
+  fixture.checkboxes["mail.send-confirmed.v1"].checked = true;
+  await fixture.submitCapabilitiesForm();
+
+  assert.equal(fixture.calls.permissionsRequest.length, 1, "选中外发能力仍会调用一次 request()（真实行为：已持有时不弹窗、直接返回 true）");
+  assert.equal(fixture.calls.permissionsRemove.length, 0, "不应该因为这次保存失败就撤销提交前已经持有的权限");
+  assert.equal(fixture.isPermissionGranted(), true, "已有权限必须原样保留");
 });
 
 test("提交表单失败时：展示错误信息并回退到真实的最新状态，不假设已生效", async () => {

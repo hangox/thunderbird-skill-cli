@@ -55,6 +55,18 @@ test("attachments.fetch 精确冻结 JSON base64 分块契约常量", () => {
   assert.ok(route.maxResponseBodyBytes >= ATTACHMENT_FETCH_MAX_CHUNK_ENCODED_BYTES);
 });
 
+test("attachments.fetch 响应字段形状被冻结，对齐 mail-write 实现的 attachmentsFetch handler", () => {
+  const route = MAIL_ROUTES.find((r) => r.id === "attachments.fetch");
+  assert.ok(route);
+  // 字段名与 extension/src/mail/attachments-write.ts::attachmentsFetch 的实际返回对象逐字一致；
+  // CLI 侧当前仍读旧的 chunk/cursor 形状（Task #36），适配是 cli-fixtures 的后续工作，不在这里断言。
+  for (const field of ["name", "contentType", "chunkBase64", "offset", "chunkBytes", "totalBytes", "done", "nextCursor"]) {
+    assert.match(route.summary, new RegExp(field), `响应字段契约必须提到 ${field}`);
+  }
+  assert.match(route.summary, /nextCursor 仅在 done=false 时出现/);
+  assert.match(route.summary, /单独改名都视为契约违反/);
+});
+
 test("attachments.save 与 attachments.fetch 都映射到同一个 CLI 命令 attachments save", () => {
   const byCommand = findMailRoutesByCommand(["attachments", "save"]);
   assert.deepEqual(byCommand.map((r) => r.id).sort(), ["attachments.fetch", "attachments.save"]);

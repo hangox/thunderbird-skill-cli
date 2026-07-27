@@ -147,7 +147,10 @@ export const MAIL_ROUTES: readonly MailRouteSpec[] = [
     summary: `凭 attachments.save 签发的 fetch token 分块拉取附件字节；响应是 JSON 内联 base64（不是原始二进制流、不新增 HTTP 分支），` +
       `单块 base64 编码后长度受 ATTACHMENT_FETCH_MAX_CHUNK_ENCODED_BYTES（${ATTACHMENT_FETCH_MAX_CHUNK_ENCODED_BYTES} 字节）硬限，` +
       `用不透明 cursor 严格单调续取，乱序/重放 cursor 拒绝。token 存活上限 ATTACHMENT_FETCH_TOKEN_TTL_MS（${ATTACHMENT_FETCH_TOKEN_TTL_MS}ms）、` +
-      `一次性使用、client+epoch 绑定、重新签发作废旧 token；具体签发/校验实现留给落地该 route 的 PR，本文件只冻结这些契约常量。`,
+      `一次性使用、client+epoch 绑定、重新签发作废旧 token。响应字段固定冻结为 ` +
+      `{ name, contentType, chunkBase64, offset, chunkBytes, totalBytes, done, nextCursor? }`+
+      `（nextCursor 仅在 done=false 时出现，done=true 表示本次已是最后一段、fetchToken 随即失效）；` +
+      `字段名/含义变更属于跨层契约变更，任何一方（handler 实现、CLI 消费方）单独改名都视为契约违反。`,
   },
   {
     id: "drafts.create", method: "POST", path: `${MAIL_ROUTE_PREFIX}drafts.create`, command: ["draft", "create"],

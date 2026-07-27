@@ -160,13 +160,44 @@ test("bundle 加载后：只读域全部 7 个 handler 都被真正拼接进产�
   });
 });
 
-test("bundle 加载后：未实现的 route（如 messages.mark）仍然精确 E_NOT_IMPLEMENTED", async (t) => {
+// 原本这里用 "messages.mark" 举例未实现 route；Task #30/mail-write 把
+// 可逆域（mark/move/trash/undo/drafts/send/attachments save&fetch/
+// operations）全部接入 READ_MAIL_ROUTE_HANDLERS 之后，"messages.mark" 已经
+// 是已实现 route，再用它断言 E_NOT_IMPLEMENTED 会变成假失败。改用永远不会
+// 存在的 route id（v0.3.0 明确排除的永久删除能力，见
+// test/routes-contract.test.mjs 的 "delete/watch/calendar 零命中" 断言）来
+// 验证"未知/未接入 route 一律 fail-closed 为 E_NOT_IMPLEMENTED"这条不变式，
+// 不与任何已实现 route 的接入状态耦合。
+test("bundle 加载后：未知/未接入的 route（如已排除的 messages.delete.confirm）仍然精确 fail-closed 为 E_NOT_IMPLEMENTED", async (t) => {
   await withIsolatedBundle(t, async (bundle) => {
     const { failed, getOperationListener } = await loadBundleInSandbox(bundle);
     const listener = getOperationListener();
-    await listener("tok_x", "messages.mark", "mail.reversible.v1", "{}", "client_demo", "0");
+    await listener("tok_x", "messages.delete.confirm", "mail.reversible.v1", "{}", "client_demo", "0");
     assert.equal(failed.length, 1);
     assert.equal(failed[0].errorCode, "E_NOT_IMPLEMENTED");
+  });
+});
+
+test("bundle 加载后：可逆/草稿/外发域（Task #30/mail-write）全部新增 handler 都被真正拼接进产物并可分发", async (t) => {
+  await withIsolatedBundle(t, async (bundle) => {
+    const { responded, failed, getOperationListener } = await loadBundleInSandbox(bundle);
+    const listener = getOperationListener();
+
+    const newRoutes = [
+      "messages.mark", "messages.move", "messages.trash",
+      "attachments.save", "attachments.fetch",
+      "drafts.create", "drafts.update", "drafts.open", "drafts.send.prepare", "drafts.send.confirm",
+      "operations.get", "operations.undo",
+    ];
+    for (const [index, routeId] of newRoutes.entries()) {
+      await listener(`tok_new_${index}`, routeId, "mail.reversible.v1", "{}", "client_demo", "0");
+    }
+    // 同样的判定标准：只要不是 E_NOT_IMPLEMENTED，就证明 dispatch 命中了真实
+    // handler（不是被误摇掉的死代码，也不是压根没接线）——handler 因为这里没
+    // mock 出完整 browser API/合法 body 而在业务层面报错是预期的，不是失败。
+    const notImplemented = failed.filter((entry) => entry.errorCode === "E_NOT_IMPLEMENTED");
+    assert.deepEqual(notImplemented, [], "可逆/草稿/外发域全部 12 个新增 route 都不应落到 E_NOT_IMPLEMENTED（即 index.ts 从不在 bundle 翻转为在 bundle）");
+    assert.equal(responded.length + failed.length, newRoutes.length);
   });
 });
 

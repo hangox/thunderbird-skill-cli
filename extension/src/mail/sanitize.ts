@@ -57,6 +57,32 @@ function isHiddenBySimpleHeuristic(element: Element): boolean {
 
 const REMOVE_ENTIRELY_TAGS = new Set(["script", "style", "head", "template", "noscript", "title"]);
 
+/**
+ * `htmlToPlainText` 在 `DOMParser` 解析失败（预期不可达，见调用点注释）时的
+ * 退化路径专用：不依赖 DOM 树，用正则尽力而为地删除带明显隐藏样式/属性的
+ * 整个元素（含其内容），覆盖单层、无嵌套同名标签的常见场景；不追求覆盖
+ * 嵌套/畸形/属性顺序刁钻的所有情况——这是"缩小泄漏窗口"而不是"消除"。
+ */
+function stripLikelyHiddenElementsWithRegex(html: string): string {
+  const hiddenOpenTagPattern = /<([a-zA-Z][\w-]*)\b(?:(?!>)[\s\S])*?(?:\bhidden\b|aria-hidden\s*=\s*["']true["']|style\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0(?:px)?)[^"']*["'])(?:(?!>)[\s\S])*?>/i;
+  let result = html;
+  // 硬上限：每轮只删一个元素（含其内容），防止畸形输入下死循环，同时足够覆盖真实邮件里出现的隐藏元素数量。
+  const MAX_ITERATIONS = 200;
+  for (let iteration = 0; iteration < MAX_ITERATIONS; iteration += 1) {
+    const openMatch = hiddenOpenTagPattern.exec(result);
+    if (!openMatch) break;
+    const tagName = openMatch[1]!;
+    const openStart = openMatch.index;
+    const openEnd = openStart + openMatch[0].length;
+    const closeMatch = new RegExp(`</${tagName}\\s*>`, "i").exec(result.slice(openEnd));
+    if (!closeMatch) break; // 找不到匹配的闭合标签：保留原样，停止，别猜测边界导致误删更多内容。
+    const closeStart = openEnd + closeMatch.index;
+    const closeEnd = closeStart + closeMatch[0].length;
+    result = result.slice(0, openStart) + result.slice(closeEnd);
+  }
+  return result;
+}
+
 function collectVisibleText(node: Node, out: string[]): void {
   if (node.nodeType === Node.TEXT_NODE) {
     out.push(node.textContent ?? "");
@@ -82,10 +108,16 @@ export function htmlToPlainText(html: string): string {
   let doc: Document;
   try {
     doc = new DOMParser().parseFromString(html, "text/html");
-  } catch {
-    // 解析失败：不冒险把原始 HTML 透传出去（可能仍带隐藏内容/标签），退化为
-    // 去标签的粗粒度净化。
-    return stripInvisibleAndBidi(html.replaceAll(/<[^>]*>/g, " ")).replaceAll(/[ \t]+/g, " ").trim();
+  } catch (error) {
+    // 解析失败：正常的 WebExtension background 页面里 `DOMParser.parseFromString`
+    // 对 `text/html` 定义上不会抛异常（畸形输入只会产生带 parsererror 的
+    // Document），这个分支预期在生产环境不可达；一旦真的触发，说明环境异常，
+    // 先打日志留痕方便排查。即便如此也不能因为拿不到 DOM 树就把隐藏内容
+    // 原样透传出去——退化路径里先按常见隐藏样式模式做一遍尽力而为的清除，
+    // 再去标签，缩小（而不是消除）隐藏文本泄漏的窗口。
+    console.error("sanitize：DOMParser 解析失败，退化为正则级净化", error);
+    const withoutHiddenElements = stripLikelyHiddenElementsWithRegex(html);
+    return stripInvisibleAndBidi(withoutHiddenElements.replaceAll(/<[^>]*>/g, " ")).replaceAll(/[ \t]+/g, " ").trim();
   }
   const out: string[] = [];
   collectVisibleText(doc.body ?? doc.documentElement, out);

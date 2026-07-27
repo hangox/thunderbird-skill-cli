@@ -665,8 +665,10 @@ test("draft send：sendMessage 真实失败时返回 E_INTERNAL 且 operations g
   assert.equal(confirmed.errorCode, "E_INTERNAL");
 
   // 标题承诺了"operations get 显示 failed"，这里必须真的调用它验证，而不是
-  // 只停在 confirm 本身的错误码上。operationId 从错误消息里按固定前缀解析
-  // （send.ts 明确嵌入，见其头部 Task #42 收敛说明）。
+  // 只停在 confirm 本身的错误码上。operationId 目前只能从错误消息文本里
+  // 提取（send.ts 没有结构化 details 通道，见其内部注释）——这个提取只用于
+  // 测试内部验证"确实存在且状态正确"，不代表这个文本格式是稳定协议，真实
+  // 调用方不应依赖这种解析方式。
   const operationIdMatch = /operationId=(op_[A-Za-z0-9_-]+)/.exec(confirmed.errorMessage);
   assert.ok(operationIdMatch, `错误消息应包含可解析的 operationId：${confirmed.errorMessage}`);
   const opsRes = await call("operations.get", { operationId: operationIdMatch[1] });
@@ -915,5 +917,132 @@ test("audit 日志：draft send 全流程（含真实主题/收件人）不泄�
     assert.doesNotMatch(line, new RegExp(secretRecipient), "审计日志不得包含完整收件人地址明文");
     assert.doesNotMatch(line, /正文机密内容/, "审计日志不得包含正文明文");
     assert.doesNotMatch(line, new RegExp(prepared.result.confirmationId), "审计日志不得包含 confirmationId 明文");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 第二轮补充验收（team-lead/Opus 追加矩阵）：confirmation 跨 pairingEpoch、
+// attachmentDigest/正文/identity 独立变化触发真实 revision 失效、
+// nonce/本机路径永远无法进入 audit（用 schema 拒绝未知字段证明，而不是
+// 空洞断言）。
+// ---------------------------------------------------------------------------
+
+test("draft send：跨 pairingEpoch 提交 confirm 必须 E_CONFIRMATION_REQUIRED，不消费合法 epoch 的 token", async () => {
+  const bundle = await getBundle();
+  const ctx = await loadBundleInSandbox(bundle);
+  const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);
+  const created = await createDraftForSend(call);
+  const prepared = await call("drafts.send.prepare", { draftRef: created.result.draftRef });
+
+  const crossEpoch = await call("drafts.send.confirm", {
+    draftRef: created.result.draftRef, confirmationId: prepared.result.confirmationId, draftRevision: prepared.result.revision,
+  }, "client_A", "1");
+  assert.equal(crossEpoch.ok, false);
+  assert.equal(crossEpoch.errorCode, "E_CONFIRMATION_REQUIRED");
+  assert.equal(ctx.browserWrite.sendAttempts.length, 0, "跨 epoch 的 confirm 绝不能触发真实发送");
+
+  // 证明上面的拒绝不是 confirmationId 本身已经失效——同 client 同 epoch=0 仍能正常兑现。
+  const legit = await call("drafts.send.confirm", {
+    draftRef: created.result.draftRef, confirmationId: prepared.result.confirmationId, draftRevision: prepared.result.revision,
+  }, "client_A", "0");
+  assert.equal(legit.ok, true, JSON.stringify(legit));
+  assert.equal(ctx.browserWrite.sendAttempts.length, 1);
+});
+
+test("draft send：仅附件变化（attachmentDigest 不符）独立触发 confirm 失效，收件人/主题/正文均未变", async () => {
+  const bundle = await getBundle();
+  const ctx = await loadBundleInSandbox(bundle);
+  const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);
+  const created = await createDraftForSend(call);
+  const prepared = await call("drafts.send.prepare", { draftRef: created.result.draftRef });
+  assert.match(prepared.result.attachmentDigest, /^sha256:[0-9a-f]{64}$/, "无附件时 attachmentDigest 仍应是一个格式合法的固定摘要");
+  const originalAttachmentDigest = prepared.result.attachmentDigest;
+
+  // 只改 attachments，不碰 to/subject/body——证明 attachmentDigest 是独立
+  // 被计算并校验的一路，不是靠 recipientDigest/subjectDigest 顺带覆盖到。
+  ctx.browserWrite.setComposeDetailsDirectly(created.result.composeTabId, { attachments: [{ name: "sneaky.pdf", size: 1 }] });
+  const confirmed = await call("drafts.send.confirm", {
+    draftRef: created.result.draftRef, confirmationId: prepared.result.confirmationId, draftRevision: prepared.result.revision,
+  });
+  assert.equal(confirmed.ok, false);
+  assert.equal(confirmed.errorCode, "E_CONFIRMATION_REQUIRED");
+  assert.equal(ctx.browserWrite.sendAttempts.length, 0);
+
+  // 直接证明摘要值本身变了（而不只是"confirm 因为某种原因失败了"）：重新
+  // prepare 一次，新的 attachmentDigest 必须与改附件前不同。
+  const reprepared = await call("drafts.send.prepare", { draftRef: created.result.draftRef });
+  assert.notEqual(reprepared.result.attachmentDigest, originalAttachmentDigest, "attachments 变化后重新计算的 attachmentDigest 必须不同");
+  assert.equal(reprepared.result.recipientDigest, prepared.result.recipientDigest, "收件人未变，recipientDigest 应保持一致");
+  assert.equal(reprepared.result.subjectDigest, prepared.result.subjectDigest, "主题未变，subjectDigest 应保持一致");
+});
+
+test("draft send：仅正文变化独立触发 revision 不符，收件人/主题/附件均未变", async () => {
+  const bundle = await getBundle();
+  const ctx = await loadBundleInSandbox(bundle);
+  const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);
+  const created = await createDraftForSend(call);
+  const prepared = await call("drafts.send.prepare", { draftRef: created.result.draftRef });
+
+  ctx.browserWrite.setComposeDetailsDirectly(created.result.composeTabId, { body: "偷偷改过的正文，与 prepare 时不一致" });
+  const confirmed = await call("drafts.send.confirm", {
+    draftRef: created.result.draftRef, confirmationId: prepared.result.confirmationId, draftRevision: prepared.result.revision,
+  });
+  assert.equal(confirmed.ok, false);
+  assert.equal(confirmed.errorCode, "E_CONFIRMATION_REQUIRED");
+  assert.equal(ctx.browserWrite.sendAttempts.length, 0);
+});
+
+test("draft send：仅 identity 变化独立触发 revision 不符，收件人/主题/正文/附件均未变", async () => {
+  const bundle = await getBundle();
+  const ctx = await loadBundleInSandbox(bundle);
+  const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);
+  const created = await createDraftForSend(call);
+  const prepared = await call("drafts.send.prepare", { draftRef: created.result.draftRef });
+
+  ctx.browserWrite.setComposeDetailsDirectly(created.result.composeTabId, { identityId: "id-different-identity" });
+  const confirmed = await call("drafts.send.confirm", {
+    draftRef: created.result.draftRef, confirmationId: prepared.result.confirmationId, draftRevision: prepared.result.revision,
+  });
+  assert.equal(confirmed.ok, false);
+  assert.equal(confirmed.errorCode, "E_CONFIRMATION_REQUIRED");
+  assert.equal(ctx.browserWrite.sendAttempts.length, 0);
+  // recipientDigest/subjectDigest/attachmentDigest 均未变，只有整体 revision
+  // 变了——证明 identityId 确实被纳入 revision 摘要输入。
+});
+
+test("audit 不泄漏 nonce/本机路径：这两类字段不在任何 E3 route 的 schema 内，携带它们的请求在 schema 层即被拒绝，从未产生任何审计事件", async () => {
+  const bundle = await getBundle();
+  const ctx = await loadBundleInSandbox(bundle);
+  const call = makeCaller(ctx.getOperationListener(), ctx.responded, ctx.failed);
+  const canaryNonce = "canary-nonce-9f1e7c2b4a";
+  const canaryPath = "/Users/victim/.ssh/id_ed25519-canary-path";
+
+  ctx.browserWrite.addMessage({});
+  const searchRes = await call("messages.search", {});
+  const msgRef = searchRes.result.messages[0].messageRef;
+
+  ctx.consoleInfos.length = 0;
+  ctx.consoleErrors.length = 0;
+
+  // attachments.save 的冻结契约只接受 attachmentRef 一个字段（team-lead/Opus
+  // 裁决："扩展不接收也不校验任何本机文件系统路径"）——伪装一个 path/directory
+  // 字段必须在 schema 层被当成未知字段拒绝，请求根本不会到达
+  // attachmentsSave() 内部，更不可能被 recordAudit() 记录下来。
+  const withPath = await call("attachments.save", { attachmentRef: "attachment_0000000000000000", path: canaryPath, directory: canaryPath });
+  assert.equal(withPath.ok, false);
+  assert.equal(withPath.errorCode, "E_VALIDATION");
+
+  // drafts.create 的 schema 同样只接受固定字段集合，伪装一个 nonce 字段必须
+  // 被当成未知字段拒绝，同样不会进入 draftsCreate() 内部。
+  const identityRef = await setupIdentity(call);
+  const withNonce = await call("drafts.create", { identityRef, subject: "x", nonce: canaryNonce });
+  assert.equal(withNonce.ok, false);
+  assert.equal(withNonce.errorCode, "E_VALIDATION");
+
+  const allLines = [...ctx.consoleInfos, ...ctx.consoleErrors].map((args) => args.map(String).join(" "));
+  assert.equal(allLines.length, 0, "两次请求都应在 schema 校验阶段被拒绝，不产生任何 console 输出（包括审计日志）");
+  for (const line of allLines) {
+    assert.doesNotMatch(line, new RegExp(canaryNonce));
+    assert.doesNotMatch(line, new RegExp(canaryPath.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 });

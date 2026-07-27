@@ -172,8 +172,12 @@ export async function draftsSendConfirm(body: unknown, context: MailAdapterConte
     // Task #42 收敛：错误消息必须真的带上 operationId，否则"请通过 operations
     // get 查询最新状态"这句提示没有任何东西可查——MailAdapterError 目前只有
     // code/message 两个字段（没有结构化 details 透传通道，那需要改
-    // background.ts/api.js 的 failOperation 签名，不在本任务改动范围内），
-    // 所以把 operationId 直接嵌进 message 文本，调用方可用固定前缀解析。
+    // background.ts/api.js 的 failOperation 签名，不在本任务改动范围内）。
+    // 这里把 operationId 写进 message 纯粹是给人看的诊断信息（供用户/Skill
+    // 复制粘贴去手动查询），不是稳定的机器可解析协议——message 文案措辞
+    // 未来可以自由调整，不构成对调用方的兼容性承诺；真正需要程序化拿到
+    // operationId 的场景，应该等结构化 details 通道落地后再由 CLI/平台层
+    // 消费，而不是依赖 message 里的固定前缀。
     throw new MailAdapterError("E_INTERNAL", `外发失败（operationId=${operationId}）：请通过 operations get 查询最新状态，不要自动重试`);
   }
 

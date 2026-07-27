@@ -220,21 +220,32 @@ test("draft send --confirm 失败时，error.details.operationId 端到端透传
   });
 });
 
-test("扩展侧 error.details 携带 allowlist 之外的额外字段时，CLI 端到端原样透传（details 的 allowlist 校验发生在扩展侧，CLI 层不重新过滤/也不因此拒绝整条响应）", { skip: !isDarwin }, async (t) => {
-  // 这条测试反过来验证 CLI 层的宽容边界：它不假设自己是 details 的 allowlist
-  // 校验方（那是 extension/bridge/api.js 的职责，见 test/mail-operations.test.mjs），
-  // 只要求 details 是一个合法的纯 JSON 对象就原样交给调用方；这里刻意用一个
-  // "假设扩展侧 allowlist 出了 bug、真的泄漏了一个额外字段"的场景，证明这不
-  // 会导致 CLI 崩溃或整条 details 被吞掉——CLI 层不是这个 canary 的最后一道
-  // 防线（那道防线在扩展侧的独立测试里），但也不能因为格式意外就丢失合法的
-  // operationId。
+test("CLI 独立二次 allowlist 仅保留 operationId：扩展侧 error.details 混入 token/nonce/path/subject/body/address/unexpected/嵌套字段时，CLI 端全部丢弃", { skip: !isDarwin }, async (t) => {
+  // src/transport.ts 的 parseMailRouteErrorBody/sanitizeMailErrorDetails
+  // 是 details 的第四道独立校验（state.ts→background.ts→api.js→transport.ts
+  // 各自独立实现，互不信任对方已经处理干净，见 extension/src/mail/state.ts
+  // 头部设计说明）。这里模拟"假设更上游的三道防线全部失守、扩展侧真的把
+  // 敏感字段泄漏进了 HTTP 响应"的最坏场景，证明 CLI 这一层仍然独立兜底：
+  // 最终 envelope.error.details 必须精确等于 { operationId }，不多不少——
+  // 不是"尽量透传合法字段"，而是硬 allowlist，其余任何字段一律丢弃。
   const clientId = await withIdentity(t);
   const operationId = `op_${"f".repeat(16)}`;
+  const maliciousDetails = {
+    operationId,
+    token: "tok_should_never_leak",
+    nonce: "canary-nonce-value",
+    path: "/Users/victim/.ssh/id_ed25519",
+    subject: "机密主题",
+    body: "机密正文内容",
+    address: "victim@example.com",
+    unexpected: "should be dropped",
+    nested: { operationId: "op_should_not_be_read_from_here" },
+  };
   const fixture = await startFakeMailApi(t, {
     routeHandlers: {
       "/v1/mail/drafts.send.confirm": () => ({
         status: 500,
-        body: { error: { code: "E_INTERNAL", message: "外发失败", details: { operationId, unexpectedExtraField: "should still parse fine" } } },
+        body: { error: { code: "E_INTERNAL", message: "外发失败", details: maliciousDetails } },
       }),
     },
   });
@@ -243,7 +254,11 @@ test("扩展侧 error.details 携带 allowlist 之外的额外字段时，CLI �
 
   await assert.rejects(run(["--client", clientId, "draft", "send", "draft_1234567890ab", "--confirm", confirmFile], env), (error) => {
     const envelope = JSON.parse(error.stdout);
-    assert.equal(envelope.error.details.operationId, operationId);
+    assert.deepEqual(envelope.error.details, { operationId }, "CLI 独立二次 allowlist 必须只保留 operationId，其余字段全部丢弃");
+    const raw = JSON.stringify(envelope.error.details);
+    for (const canary of ["tok_should_never_leak", "canary-nonce-value", "id_ed25519", "机密主题", "机密正文内容", "victim@example.com", "should be dropped", "op_should_not_be_read_from_here"]) {
+      assert.doesNotMatch(raw, new RegExp(canary.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")), `details 不应包含 canary：${canary}`);
+    }
     return true;
   });
 });

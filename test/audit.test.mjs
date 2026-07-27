@@ -15,7 +15,7 @@
 // 根本原因。
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
@@ -25,7 +25,9 @@ const execFileAsync = promisify(execFile);
 const projectRoot = new URL("..", import.meta.url).pathname;
 
 let recordAudit;
+let auditModule;
 let outDir;
+let auditJsPath;
 
 before(async () => {
   // 独立编译到临时目录，不读写共享的 extension/dist/——同样的隔离策略见
@@ -36,12 +38,27 @@ before(async () => {
     "-p", join(projectRoot, "extension/tsconfig.json"),
     "--outDir", outDir,
   ]);
-  ({ recordAudit } = await import(`file://${join(outDir, "audit.js")}?t=${Date.now()}`));
+  auditJsPath = join(outDir, "audit.js");
+  auditModule = await import(`file://${auditJsPath}?t=${Date.now()}`);
+  ({ recordAudit } = auditModule);
 });
 
 after(async () => {
   if (outDir) await rm(outDir, { recursive: true, force: true });
 });
+
+/**
+ * `extension/src/audit.ts` 在 AUDIT_HASH_KEY 上没有任何 import——把编译产物
+ * 复制成一个不同的文件路径再 `import()`，ESM 模块缓存按 URL 区分，会得到
+ * 一份独立的模块实例，其顶层 `crypto.getRandomValues(AUDIT_HASH_KEY)` 会
+ * 重新执行一次，产出与原模块不同的私有 key——这模拟的正是"进程重启后
+ * 重新加载模块"的场景，不需要真的开另一个进程。
+ */
+async function importFreshAuditModule() {
+  const freshPath = join(outDir, `audit-fresh-${Math.random().toString(36).slice(2)}.js`);
+  await copyFile(auditJsPath, freshPath);
+  return import(`file://${freshPath}?t=${Date.now()}`);
+}
 
 /** 劫持 console.info/console.error，返回捕获的调用与一个恢复函数。 */
 function captureConsole() {
@@ -87,7 +104,7 @@ test("recordAudit：合法调用只输出 route/capability/client(hash)/outcome�
   const line = parseLine(cap.infos[0]);
   assert.equal(line.route, "messages.mark");
   assert.equal(line.capability, "mail.reversible.v1");
-  assert.match(line.client, /^client#[0-9a-f]{8}$/);
+  assert.match(line.client, /^client#[0-9a-f]{16}$/);
   assert.equal(line.outcome, "success");
   assert.equal("reason" in line, false);
   assert.doesNotMatch(JSON.stringify(line), /client_super_secret_001/);
@@ -230,4 +247,49 @@ test("recordAudit：同一个 clientId 每次都映射到相同的 keyed hash，
   const [a1, a2, b1] = cap.infos.map(parseLine);
   assert.equal(a1.client, a2.client);
   assert.notEqual(a1.client, b1.client);
+});
+
+// ---------------------------------------------------------------------------
+// keyed hash 的"keyed"部分：不是"同一输入稳定映射到同一摘要"就够了（裸
+// FNV-1a 也满足这一点，但外部知道 clientId 明文就能自己重算、逐条比对
+// 日志反查身份）。这里验证的是"没有这个进程私有 key 就无法重算"——通过
+// 模拟"进程重启"（重新 import 一份独立编译的模块，触发一次新的
+// crypto.getRandomValues）来证明同一个 clientId 在不同 key 下产出不同
+// hash，而不是一个固定的、可公开重算的函数。
+// ---------------------------------------------------------------------------
+
+test("hashClientId 是真正的 keyed hash：模拟进程重启（重新加载模块）后，同一个 clientId 的 hash 大概率改变", async () => {
+  const fresh = await importFreshAuditModule();
+
+  const capBefore = captureConsole();
+  let beforeLine;
+  try {
+    recordAudit({ routeId: "x", capability: "mail.reversible.v1", clientId: "same_client_across_restart", outcome: "success" });
+    beforeLine = parseLine(capBefore.infos[0]);
+  } finally {
+    capBefore.restore();
+  }
+
+  const capAfter = captureConsole();
+  let afterLine;
+  try {
+    fresh.recordAudit({ routeId: "x", capability: "mail.reversible.v1", clientId: "same_client_across_restart", outcome: "success" });
+    afterLine = parseLine(capAfter.infos[0]);
+  } finally {
+    capAfter.restore();
+  }
+
+  // 128 bit key 空间下两次独立随机抽样撞出同一对 32-bit 累加器初值的概率
+  // 可忽略不计；如果这条断言失败，说明 hashClientId 事实上没有真正依赖
+  // AUDIT_HASH_KEY（例如 key 混入代码被误删/短路），退化回了裸 FNV-1a。
+  assert.notEqual(beforeLine.client, afterLine.client, "同一 clientId 在两个独立加载的模块实例（不同随机 key）下必须产出不同的 hash，否则 key 没有真正参与运算");
+});
+
+test("hashClientId 的私有 key 从不通过模块导出面暴露：编译产物的运行时导出集合里只有 recordAudit", async () => {
+  // audit.ts 里 AuditOutcome/AuditReason/AuditEvent 都是 `export type`/
+  // `export interface`——纯类型声明，tsc 编译后完全擦除，不会产生任何
+  // 运行时绑定；AUDIT_HASH_KEY 本身是模块作用域的 `const`，从未 `export`。
+  // 直接断言编译产物的运行时导出面，防止未来有人为了"方便调试"顺手把
+  // AUDIT_HASH_KEY 或 hashClientId 导出，从而让 key 变得可从模块外部读取。
+  assert.deepEqual(Object.keys(auditModule).sort(), ["recordAudit"]);
 });

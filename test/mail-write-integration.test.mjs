@@ -891,7 +891,7 @@ test("audit 日志：mark 成功事件不含 token/正文/完整邮箱地址，c
     assert.doesNotMatch(line, new RegExp(undoToken), "审计日志不得包含 undo token 明文");
     assert.doesNotMatch(line, /@example\.com/, "审计日志不得包含完整邮箱地址");
   }
-  assert.ok(auditLines.some((line) => /client#[0-9a-f]{8}/.test(line)), "client 应以固定格式的 keyed hash 出现，而不是原始 id 或完全缺席");
+  assert.ok(auditLines.some((line) => /client#[0-9a-f]{16}/.test(line)), "client 应以固定格式的 keyed hash（16 位十六进制）出现，而不是原始 id 或完全缺席");
 
   // Task #42：detail 自由文本已被移除，改为封闭 allowlist——这里正面验证
   // messages.mark 真实产出的是结构化 affectedCount 数值字段，而不是任何

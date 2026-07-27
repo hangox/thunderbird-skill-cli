@@ -11,7 +11,10 @@
 //
 // clientId 本身不是凭据（不是 token/nonce），但仍按 docs/07 的"keyed hash"
 // 原则处理，避免原始 clientId 大量出现在日志里（例如被日志聚合工具索引后
-// 用于跨会话关联同一用户的行为模式）。
+// 用于跨会话关联同一用户的行为模式）。真正的 keyed hash（而不是可公开重算
+// 的裸摘要）——见下方 AUDIT_HASH_KEY/hashClientId：外部即便知道明文
+// clientId，缺少这个进程私有随机 key 也无法重算出同样的 `client#...` 值，
+// 因此不能靠"猜测 clientId 再比对日志"的方式反查身份。
 //
 // 结构化 allowlist（Task #42 收敛，2026-07-27）：此前 `detail` 是自由文本
 // `string`，脱敏完全依赖调用方自律——TypeScript 类型系统挡不住任何人在
@@ -57,14 +60,44 @@ export interface AuditEvent {
   readonly done?: boolean;
 }
 
-/** 非密码学用途的 keyed hash：只需要"不可逆展示原文、同一输入稳定映射到同一摘要"，不需要抗碰撞强度（clientId 不是需要防伪造的秘密）。 */
+// 进程私有随机 key：模块加载（背景脚本启动）时生成一次，此后常驻内存、
+// 从不写入任何日志/返回值，也没有任何导出路径可以读到它。128 bit（4 个
+// 32-bit word）——同一进程内所有 hashClientId() 调用共享这同一份 key，
+// 因此同进程内同一个 clientId 的 hash 保持稳定（可以在日志里关联同一
+// client 的多条事件）；扩展重启（进程重启）后模块重新加载会生成一份新
+// key，之前进程产出的日志与新进程的 hash 不再相同——这不是 bug，是"外部
+// 不能靠长期收集同一 clientId 的历史 hash 值来跨重启建立稳定画像"这条
+// 设计意图的直接体现。
+const AUDIT_HASH_KEY = new Uint32Array(4);
+crypto.getRandomValues(AUDIT_HASH_KEY);
+
+/** 把一个 32-bit word 的全部 4 个字节依次混入 FNV-1a 累加器（而不是把 word 当成单个数字异或一次，那样只有低 8 位真正参与逐字节混合）。 */
+function mixWord(hash: number, word: number): number {
+  hash ^= word & 0xff; hash = Math.imul(hash, 0x01000193);
+  hash ^= (word >>> 8) & 0xff; hash = Math.imul(hash, 0x01000193);
+  hash ^= (word >>> 16) & 0xff; hash = Math.imul(hash, 0x01000193);
+  hash ^= (word >>> 24) & 0xff; hash = Math.imul(hash, 0x01000193);
+  return hash;
+}
+
+/**
+ * 真正的 keyed hash（不是可公开重算的裸 FNV-1a）：两个并行的 32-bit
+ * FNV-1a 累加器，各自先用两个不同的 AUDIT_HASH_KEY word 初始化（因此两个
+ * 累加器从一开始就依赖进程私有的随机 key，不只是在最后异或一下 key），
+ * 再把 clientId 的 UTF-16 code unit 逐个混入两个累加器，最后拼接成 64 bit
+ * （16 位十六进制）输出。不需要抗碰撞的密码学强度（clientId 不是需要防
+ * 伪造的秘密），只需要"没有 key 就无法重算、同进程同输入稳定、不同输入
+ * 大概率不同"。
+ */
 function hashClientId(clientId: string): string {
-  let hash = 0x811c9dc5; // FNV-1a 32-bit offset basis
+  let h1 = mixWord(mixWord(0x811c9dc5, AUDIT_HASH_KEY[0]!), AUDIT_HASH_KEY[1]!);
+  let h2 = mixWord(mixWord(0x811c9dc5, AUDIT_HASH_KEY[2]!), AUDIT_HASH_KEY[3]!);
   for (let index = 0; index < clientId.length; index += 1) {
-    hash ^= clientId.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
+    const code = clientId.charCodeAt(index);
+    h1 ^= code; h1 = Math.imul(h1, 0x01000193);
+    h2 ^= code; h2 = Math.imul(h2, 0x01000193);
   }
-  return (hash >>> 0).toString(16).padStart(8, "0");
+  return (h1 >>> 0).toString(16).padStart(8, "0") + (h2 >>> 0).toString(16).padStart(8, "0");
 }
 
 /** 非负安全整数：拒绝 NaN/Infinity/负数/非整数，这类畸形值直接丢弃该字段而不是让它以奇怪形式进日志。 */

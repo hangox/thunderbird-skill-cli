@@ -313,6 +313,87 @@ test("setMailCapabilities 未配对时拒绝，配对后只接受已知能力标
   });
 });
 
+// ---------------------------------------------------------------------------
+// operationChannel 生命周期（Task #47）：真实 Gecko 会在 MV3 classic
+// background 脚本被销毁重建时，用一个新的 `context` 重新调用
+// `getAPI(context)`。修复前，`globalThis.__tbSkillState ??= {...
+// operationChannel: createOperationChannel(context) ...}` 里的 `??=` 短路
+// 意味着 operationChannel/pairingRevokedEvent 只会绑定到第一次见到的
+// context；旧 context 死亡时真实 EventManager 会自动 unregister（把
+// `fireEvent` 置空），但缓存的 operationChannel 对象从不会被替换——于是
+// background 重建之后，新脚本重新注册的 onOperation 监听器永远收不到
+// dispatch() fireEvent 出来的事件，所有邮件 route 请求都会立即变成 503
+// E_THUNDERBIRD_OFFLINE，即使 HTTP server/pairing/能力状态本身完全正常。
+// 这里用 harness.reconnectBackgroundContext()（内部驱动真实 FakeEventManager
+// 的 context.close() 自动 unregister）复现这个场景并验证修复。
+// ---------------------------------------------------------------------------
+
+test("MV3 background context 重建后，新注册的 onOperation 监听器能正常收到事件，不会永久 503 E_THUNDERBIRD_OFFLINE（Task #47 回归）", async (t) => {
+  await withHarness(t, async (harness) => {
+    const identity = makeIdentity();
+    await pair(harness, identity);
+    await grantMailCapabilities(harness, ["mail.read.v1"]);
+
+    // 重建前：验证 onOperation/respondToOperation 走的是正常路径。
+    const payloadBefore = { accounts: [{ id: "acc_before", name: "Before" }] };
+    listenOnce(harness, async (token) => {
+      await harness.api.respondToOperation(token, JSON.stringify(payloadBefore));
+    });
+    const resultBefore = await handle(harness, buildRequest(harness, { method: "POST", path: ACCOUNTS_LIST_PATH, bodyText: "{}", identity }));
+    assert.equal(resultBefore.status, 200);
+    assert.deepEqual(resultBefore.body, payloadBefore);
+
+    const descriptorBefore = harness.descriptor();
+
+    // 模拟 MV3 classic background 脚本被销毁重建：旧 context 触发
+    // FakeEventManager 的自动 unregister，getAPI() 用新 context 重新调用。
+    const newApi = harness.reconnectBackgroundContext();
+    assert.notEqual(newApi, undefined);
+
+    // server/pairing/epoch 状态不应该在 context 重建过程中被错误重置。
+    const descriptorAfter = harness.descriptor();
+    assert.equal(descriptorAfter.pairingEpoch, descriptorBefore.pairingEpoch, "重建不应改变 pairing epoch");
+    assert.equal(descriptorAfter.sessionToken, descriptorBefore.sessionToken, "重建不应轮换 sessionToken");
+
+    // 重建后必须仍能走已授权的能力路径（setMailCapabilities 的写入应存续）。
+    const payloadAfter = { accounts: [{ id: "acc_after", name: "After" }] };
+    const after = listenOnce(harness, async (token) => {
+      await harness.api.respondToOperation(token, JSON.stringify(payloadAfter));
+    });
+    const startedAt = Date.now();
+    const resultAfter = await handle(harness, buildRequest(harness, { method: "POST", path: ACCOUNTS_LIST_PATH, bodyText: "{}", identity }));
+    // 修复前：dispatch() 内部 fireEvent 调用的仍是绑定在旧（已死亡）context
+    // 上的 operationChannel，新监听器完全收不到事件，这里会立即（远早于
+    // 5s 默认 deadline）拿到 503 E_THUNDERBIRD_OFFLINE。
+    assert.equal(resultAfter.status, 200, `修复前会在这里得到 503 E_THUNDERBIRD_OFFLINE；实际 status=${resultAfter.status} code=${resultAfter.code}`);
+    assert.deepEqual(resultAfter.body, payloadAfter);
+    assert.equal(after.captured().routeId, "accounts.list");
+    assert.ok(Date.now() - startedAt < 500, "重建后的请求应正常快速完成，不应挂到 deadline");
+  });
+});
+
+test("MV3 background context 重建后，旧 context 上的 onOperation 监听器随之失效，不会残留双触发", async (t) => {
+  await withHarness(t, async (harness) => {
+    const identity = makeIdentity();
+    await pair(harness, identity);
+    await grantMailCapabilities(harness, ["mail.read.v1"]);
+
+    const oldApi = harness.api;
+    let oldListenerFired = false;
+    oldApi.onOperation.addListener(() => { oldListenerFired = true; });
+
+    harness.reconnectBackgroundContext();
+
+    const payload = { accounts: [] };
+    listenOnce(harness, async (token) => {
+      await harness.api.respondToOperation(token, JSON.stringify(payload));
+    });
+    const result = await handle(harness, buildRequest(harness, { method: "POST", path: ACCOUNTS_LIST_PATH, bodyText: "{}", identity }));
+    assert.equal(result.status, 200);
+    assert.equal(oldListenerFired, false, "旧 context 的监听器应随 context 销毁一并失效，不应再被新事件触发");
+  });
+});
+
 test("listMailRoutes() 与 src/contracts/routes.ts 的 MAIL_ROUTES id 集合完全一致", async (t) => {
   await withHarness(t, async (harness) => {
     const { MAIL_ROUTES } = await import("../dist/contracts/routes.js");

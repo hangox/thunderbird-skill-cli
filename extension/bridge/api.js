@@ -772,6 +772,10 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
   getAPI(context) {
     resProto.setSubstitutionWithFlags(RESOURCE_NAME, context.extension.rootURI, resProto.ALLOW_CONTENT_ACCESS);
     const storedPairing = loadPairing();
+    // `state` 本身（server/port/pairing/epoch/receipts/nonces 等）必须跨
+    // getAPI() 的多次调用持久，`??=` 对这部分是正确的——它们的生命周期绑定
+    // 的是"这个 Experiment 特权 JS 域还活着"，不是某一次具体的 background
+    // context。
     const state = globalThis.__tbSkillState ??= {
       pairingEpoch: 0n,
       server: null,
@@ -787,14 +791,37 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
       pending: null,
       receipts: new Map(),
       nonces: new Map(),
-      operationChannel: createOperationChannel(context),
-      pairingRevokedEvent: createNotificationEvent(context, "thunderbirdSkillBridge.onPairingRevoked"),
       error: null,
       startPromise: null,
       expiryTimer: null,
       shutdownObserver: null,
       descriptorWatchdog: null,
     };
+    // `operationChannel`/`pairingRevokedEvent` 必须与本次 getAPI() 的
+    // `context` 参数绑定，不能放进上面 `??=` 缓存的 state 里——它们内部的
+    // `createEventManager()` 用真实 `ExtensionCommon.EventManager` 实现时，
+    // EventManager 会把自己的生命周期绑定到构造时传入的那个 `context`：
+    // 该 context（对应一次具体的 classic background 脚本实例化）被销毁时，
+    // EventManager 会自动触发内部 unregister，把 `fireEvent` 清成 null。
+    //
+    // 此前的 bug：`operationChannel: createOperationChannel(context)` 写在
+    // `??=` 对象字面量里，只有第一次 getAPI() 调用（state 还不存在）才会
+    // 真的执行——MV3 background 页在生命周期内被销毁重建时（例如挂起后
+    // 重新唤醒），Thunderbird 会用一个新的 context 再调一次 getAPI()，但
+    // `globalThis.__tbSkillState` 已经存在，`??=` 直接短路，永远复用第一次
+    // 那个绑定在**旧** context 上的 operationChannel。旧 context 销毁时
+    // EventManager 自动 unregister 把 fireEvent 清空，新 background 脚本
+    // 调用 `onOperation.addListener()` 拿到的却还是那个绑定在死 context 上
+    // 的 event 对象——`operationChannel.dispatch()` 里 `if (!fireEvent)`
+    // 恒为真，全部邮件 route 立即 `E_THUNDERBIRD_OFFLINE`，即使 HTTP 服务、
+    // 配对、capabilities（都存在 `state` 里，不受影响）看起来一切正常。
+    //
+    // 修复：每次 getAPI(context) 都必须用**这次**的 context 重新创建两者；
+    // 旧的（如果存在）先 clear() 让其上任何仍然挂起的 operation 立即失败
+    // 关闭，而不是无限期悬挂等一个再也不会来的响应。
+    if (state.operationChannel) state.operationChannel.clear("background context 已重建，旧连接失效");
+    state.operationChannel = createOperationChannel(context);
+    state.pairingRevokedEvent = createNotificationEvent(context, "thunderbirdSkillBridge.onPairingRevoked");
 
     function stopService(reason) {
       if (state.expiryTimer) {

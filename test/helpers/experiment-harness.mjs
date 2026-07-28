@@ -42,6 +42,75 @@ function cryptoHash() {
   };
 }
 
+// Task #47 生命周期回归：真实 Gecko 的 `ExtensionCommon.EventManager` 会把
+// 自己的注册状态绑定到构造时传入的 `context`——那个 context 死亡（比如
+// classic background 脚本被销毁重建）时，EventManager 内部自动触发
+// unregister，把 register() 返回的清理回调跑一遍。这份夹具此前完全没有
+// `ExtensionCommon.EventManager`（`typeof ExtensionCommon.EventManager`
+// 是 `"undefined"`），api.js 里 `createEventManager()` 因此永远走那条
+// "退化实现"分支——那条分支不认识 context 生命周期，无法暴露
+// "getAPI() 被同一个 __tbSkillState 复用、但 context 已经换了一个" 这类
+// 生命周期 bug。这里补一个足够真实的最小 EventManager 模拟：
+// - `context.callOnClose(closeable)` 登记一个"context 关闭时执行"的回调
+//   （真实 Gecko API 原名如此，`ExtensionCommon.EventManager` 内部就是靠
+//   它自动 unregister 的）。
+// - `context.close()` 触发全部已登记回调，模拟"这个 background context
+//   被销毁了"。
+function makeBackgroundContext() {
+  const closeCallbacks = [];
+  return {
+    extension: { rootURI: "resource://test/" },
+    callOnClose(closeable) { closeCallbacks.push(closeable); },
+    close() { for (const closeable of closeCallbacks.splice(0)) closeable.close(); },
+  };
+}
+
+class FakeEventManager {
+  constructor({ context, register }) {
+    this.listeners = new Set();
+    this.unregister = null;
+    // 真实 Gecko 的 EventManager 实例在构造时把自己永久绑定到这一个
+    // `context`——`register`/`fire` 回调本身不重新校验 context 是否还活着，
+    // 但框架层面等效于"这个 context 死了之后，绑定它的 EventManager 也
+    // 一并报废"：无论是因为跨 compartment 的 exportFunction 引用变成
+    // dead object，还是内部 shouldFire()/context.unloaded 门禁，最终
+    // 可观察的结果都是同一个——close() 之后这个实例不能再被有效地重新
+    // addListener() 复活。这一点必须建模出来，否则"getAPI() 复用了绑定在
+    // 旧 context 上的 event manager"这个 Task #47 bug 场景会被新监听者的
+    // 重新注册悄悄"自愈"，测出一个假阴性（旧版本的这份 mock 就踩了这个坑：
+    // 允许 close() 之后 addListener() 无条件重新 register()，导致回归测试
+    // 在有 bug 的源码上也能通过）。
+    this.closed = false;
+    context.callOnClose({
+      close: () => {
+        this.closed = true;
+        this.listeners.clear();
+        if (this.unregister) { this.unregister(); this.unregister = null; }
+      },
+    });
+    this.register = register;
+  }
+  api() {
+    const listeners = this.listeners;
+    const fire = {
+      async(...args) { for (const listener of listeners) listener(...args); },
+      sync(...args) { for (const listener of listeners) listener(...args); },
+    };
+    return {
+      addListener: (listener) => {
+        if (this.closed) return; // 绑定的 context 已死：静默失效，不重新 register()。
+        listeners.add(listener);
+        if (listeners.size === 1) this.unregister = this.register(fire);
+      },
+      removeListener: (listener) => {
+        listeners.delete(listener);
+        if (listeners.size === 0 && this.unregister) { this.unregister(); this.unregister = null; }
+      },
+      hasListener: (listener) => listeners.has(listener),
+    };
+  }
+}
+
 function safeOutputStream() {
   let target = null;
   let buffer = "";
@@ -89,7 +158,7 @@ export async function startExperiment(options = {}) {
     Ci: new Proxy({}, { get: (_target, key) => (key === "nsIFile" ? { DIRECTORY_TYPE: 1 } : {}) }),
     Cr: { NS_BASE_STREAM_WOULD_BLOCK: Symbol("would-block"), NS_BASE_STREAM_CLOSED: Symbol("closed"), NS_ERROR_ABORT: Symbol("abort") },
     ChromeUtils: { generateQI: () => function QueryInterface() { return this; } },
-    ExtensionCommon: { ExtensionAPI: class {} },
+    ExtensionCommon: { ExtensionAPI: class {}, EventManager: FakeEventManager },
     Services: {
       appShell: { hiddenDOMWindow: hiddenWindow },
       appinfo: { processID: process.pid },
@@ -123,14 +192,15 @@ export async function startExperiment(options = {}) {
   };
 
   const instance = new sandbox.thunderbirdSkillBridge();
-  const api = instance.getAPI({ extension: { rootURI: "resource://test/" } }).thunderbirdSkillBridge;
+  let currentContext = makeBackgroundContext();
+  let api = instance.getAPI(currentContext).thunderbirdSkillBridge;
   const started = await api.start();
 
-  return {
-    api,
+  const harness = {
     root,
     prefs,
     port: started.port,
+    get api() { return api; },
     get preflight() { return captured.preflight; },
     get dispatch() { return captured.dispatch; },
     // 真实 HTTP parser 入口：把原始 HTTP/1.1 报文交给 api.js 内部真正的
@@ -147,8 +217,23 @@ export async function startExperiment(options = {}) {
     descriptor: () => JSON.parse(readFileSync(started.descriptorPath, "utf8")),
     sessionToken: () => JSON.parse(readFileSync(api === null ? "" : started.descriptorPath, "utf8")).sessionToken,
     onShutdown: () => instance.onShutdown(true),
+    // Task #47 生命周期回归专用：模拟"当前 classic background context 被
+    // 销毁、Thunderbird 用一个新 context 重新调用 getAPI()"——不重启 HTTP
+    // 服务（`captured`/`started` 不变，与真实 bug 场景"HTTP 服务仍在线"
+    // 一致），只重新走一次 getAPI(newContext)，并把 `harness.api` 更新为
+    // 新返回的 api 引用（`get api()` 因此总是拿到最新的那份）。旧 context
+    // 的 `close()` 会通过 FakeEventManager 触发旧 operationChannel/
+    // pairingRevokedEvent 的自动 unregister，真实复现"旧 context 死后
+    // fireEvent 变 null"这条 Gecko 行为，而不是空洞地换一个 context 对象。
+    reconnectBackgroundContext() {
+      currentContext.close();
+      currentContext = makeBackgroundContext();
+      api = instance.getAPI(currentContext).thunderbirdSkillBridge;
+      return api;
+    },
     cleanup: async () => { sandbox.__tbSkillState = null; await rm(root, { recursive: true, force: true }); },
   };
+  return harness;
 }
 
 export function makeIdentity(clientId = "client_harness01") {

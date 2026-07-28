@@ -18,9 +18,19 @@ test("扩展 background 产物是 classic script 且失败路径不启用邮件�
   assert.match(source, /void startBridge\(\)/);
 });
 
-test("扩展 manifest 在 Phase 1 不申请邮件权限且只声明专用 Experiment API", async () => {
+test("扩展 manifest 0.4.0 常驻权限只覆盖只读/可逆/草稿，不申请永久删除或日历权限；外发（compose.send）收紧为默认不持有的可选权限", async () => {
   const manifest = JSON.parse(await readFile(new URL("../extension/manifest.json", import.meta.url), "utf8"));
-  assert.deepEqual(manifest.permissions, []);
+  // 权限最小化按官方核验收紧：accountsRead 已覆盖只读文件夹枚举，无需
+  // accountsFolders；compose/compose.save 支持草稿。compose.send（Task #44，
+  // 0.4.0）是独立的可选权限——常驻 permissions 里绝不出现它，只能出现在
+  // optional_permissions 里，用户须在 options 页面经浏览器原生
+  // permissions.request() 同意后才真正持有，见 extension/src/options.ts。
+  assert.deepEqual(new Set(manifest.permissions), new Set(["accountsRead", "messagesRead", "messagesUpdate", "messagesMove", "compose", "compose.save"]));
+  assert.equal(manifest.permissions.includes("accountsFolders"), false, "只读文件夹枚举已被 accountsRead 覆盖，不应重复申请 accountsFolders");
+  assert.equal(manifest.permissions.includes("messagesDelete"), false, "永久删除本轮不实现，绝不申请 messagesDelete（物理保证）");
+  assert.equal(manifest.permissions.includes("compose.send"), false, "compose.send 绝不能出现在常驻 permissions 里，否则默认物理可发送的保证失效");
+  assert.equal(manifest.permissions.some((permission) => /calendar/i.test(permission)), false, "calendar 本轮完全不纳入，不申请任何日历权限");
+  assert.deepEqual(manifest.optional_permissions, ["compose.send"], "compose.send 必须且只能作为可选权限声明");
   assert.deepEqual(manifest.host_permissions, []);
   assert.deepEqual(Object.keys(manifest.experiment_apis), ["thunderbirdSkillBridge"]);
   assert.equal(manifest.experiment_apis.thunderbirdSkillBridge.parent.script, "bridge/api.js");
@@ -218,7 +228,7 @@ test("配对 UI 将确认绑定到最后展示的 intent 和挑战码", async ()
 });
 
 test("发布/运行版本四源完全一致，且 schemaVersion 不被卷入产品版本", async () => {
-  const RELEASE_VERSION = "0.2.1";
+  const RELEASE_VERSION = "0.4.0";
   const [packageJson, manifest, apiSource] = await Promise.all([
     readFile(new URL("../package.json", import.meta.url), "utf8").then(JSON.parse),
     readFile(new URL("../extension/manifest.json", import.meta.url), "utf8").then(JSON.parse),

@@ -1,14 +1,15 @@
 import { request } from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { PAIRING_EPOCH_PATTERN, type InstanceDescriptor } from "./discovery.js";
-import type { ErrorCode } from "./contracts/envelope.js";
+import { ERROR_CODES, type ErrorCode, type MailErrorDetails } from "./contracts/envelope.js";
 import { PUBLIC_KEY_ALGORITHM, signRequest, type PairingIdentity, type SigningIdentity } from "./auth.js";
+import { MAIL_CAPABILITIES, type MailRouteSpec } from "./contracts/routes.js";
 
-export const CLI_VERSION = "0.2.1";
+export const CLI_VERSION = "0.4.0";
 const MAX_RESPONSE_BYTES = 1024 * 1024;
-const CAPABILITIES = new Set(["mail.read.v1", "mail.reversible.v1", "draft.write.v1", "mail.send-confirmed.v1", "calendar.read.v1"]);
+const CAPABILITIES = new Set<string>(MAIL_CAPABILITIES);
 
-export type Capability = "mail.read.v1" | "mail.reversible.v1" | "draft.write.v1" | "mail.send-confirmed.v1" | "calendar.read.v1";
+export type Capability = (typeof MAIL_CAPABILITIES)[number];
 export interface StatusResponse {
   protocolVersion: number;
   minCliVersion: string;
@@ -42,6 +43,8 @@ export class TransportError extends Error {
     readonly code: ErrorCode,
     message: string,
     readonly retryable = false,
+    /** Task #43：结构化失败详情（目前只有 operationId），来自扩展侧 HTTP error envelope 的 `error.details`；已在 parseMailRouteErrorBody 里做过窄类型 sanitize，不是原样透传的任意对象。 */
+    readonly details?: MailErrorDetails,
   ) {
     super(message);
   }
@@ -257,4 +260,78 @@ export async function fetchPairingIntent(descriptor: InstanceDescriptor, timeout
   throwForStatus(response);
   if (response.statusCode !== 200) throw new TransportError("E_NOT_PAIRED", "配对请求不存在或已失效");
   return parsePairingIntentStatus(parseJsonResponse(response));
+}
+
+// ---------------------------------------------------------------------------
+// 全部邮件 route 的通用低层调用原语；src/cli.ts 的 MAIL_MOUNTS 声明式挂载表
+// 复用它做 command → route 的统一分派，不必每条邮件命令各自重新实现签名/
+// 错误映射。
+//
+// 与 fetchStatus/beginPairing/fetchPairingIntent 各自的窄错误映射（throwForStatus/
+// parseConflictCode）刻意保持独立：那两者的错误码集合是为 /v1/status 与
+// /v1/pairing/intents 这两个固定 endpoint 手工穷举的，而邮件 route 的错误码
+// 集合由 extension/bridge/api.js 按 route 动态决定（E_POLICY_DENIED、
+// E_NOT_FOUND、E_CONFIRMATION_REQUIRED、E_NOT_IMPLEMENTED 等），因此改用
+// "body 里的 code 只要是已知 ErrorCode 就直接采信"的通用策略，而不是逐个
+// HTTP 状态码硬编码允许哪些 code。
+// ---------------------------------------------------------------------------
+
+const KNOWN_ERROR_CODES = new Set<string>(ERROR_CODES);
+
+function isKnownErrorCode(value: unknown): value is ErrorCode {
+  return typeof value === "string" && KNOWN_ERROR_CODES.has(value);
+}
+
+/** 与 extension/src/background.ts 的 OPERATION_ID_PATTERN 是同一份契约的镜像；operationId 是目前 MailErrorDetails 唯一的合法字段。 */
+const OPERATION_ID_PATTERN = /^op_[A-Za-z0-9_-]{16,128}$/;
+
+/**
+ * details 的窄类型 sanitizer（Task #43）：只接受自有属性 `operationId`，
+ * 且值必须匹配 opaque ref 格式；任何其他键（无论是未知字段、看似无害的
+ * string/number/boolean，还是嵌套对象/数组）一律静默丢弃，不做"尽量保留"
+ * 式的宽松透传。格式不符时整个 details 视为不存在，不影响 code/message
+ * 的正常解析——details 本身是锦上添花的补充信息，不是协议必需部分。
+ */
+function sanitizeMailErrorDetails(value: unknown): MailErrorDetails | undefined {
+  if (!isRecord(value)) return undefined;
+  if (!Object.hasOwn(value, "operationId")) return undefined;
+  const operationId = value.operationId;
+  if (typeof operationId !== "string" || !OPERATION_ID_PATTERN.test(operationId)) return undefined;
+  return { operationId };
+}
+
+function parseMailRouteErrorBody(response: ApiResponse): { code: ErrorCode; message: string; details?: MailErrorDetails } | undefined {
+  let value: unknown;
+  try { value = parseJsonResponse(response); } catch { return undefined; }
+  if (!isRecord(value) || Object.keys(value).length !== 1 || !isRecord(value.error)) return undefined;
+  const errorRecord = value.error;
+  const keys = new Set(Object.keys(errorRecord));
+  if (!keys.has("code") || !keys.has("message")) return undefined;
+  for (const key of keys) if (key !== "code" && key !== "message" && key !== "details") return undefined;
+  if (!isKnownErrorCode(errorRecord.code) || typeof errorRecord.message !== "string") return undefined;
+  const details = keys.has("details") ? sanitizeMailErrorDetails(errorRecord.details) : undefined;
+  return { code: errorRecord.code, message: errorRecord.message, ...(details ? { details } : {}) };
+}
+
+/**
+ * 调用一条已冻结的邮件 route（method 恒为 POST）。identity 必填：全部邮件
+ * route 都强制要求 client 签名，未配对/未授予对应 capability 时扩展会在
+ * 认证或 capability 检查阶段失败关闭，CLI 侧不做任何本地降级判断。
+ */
+export async function callMailRoute(
+  descriptor: InstanceDescriptor,
+  route: Pick<MailRouteSpec, "method" | "path">,
+  body: Record<string, unknown>,
+  timeoutMs: number,
+  identity: SigningIdentity,
+): Promise<unknown> {
+  const response = await requestApi({ descriptor, method: route.method, path: route.path, body, timeoutMs, identity });
+  if (response.statusCode === 200) return parseJsonResponse(response);
+  const parsed = parseMailRouteErrorBody(response);
+  if (parsed) throw new TransportError(parsed.code, parsed.message, parsed.code === "E_PAIRING_CHANGED", parsed.details);
+  if (response.statusCode === 401 || response.statusCode === 403) throw new TransportError("E_AUTH", "本地会话认证失败");
+  if (response.statusCode === 404) throw new TransportError("E_NOT_FOUND", "对象不存在，或不属于当前实例/配对范围");
+  if (response.statusCode === 426) throw new TransportError("E_VERSION_MISMATCH", "CLI 与 Thunderbird 扩展版本不兼容；请升级到匹配的一对版本");
+  if (response.statusCode === 501) throw new TransportError("E_NOT_IMPLEMENTED", "该邮件能力尚未实现");
+  throw new TransportError("E_VALIDATION", "Thunderbird 扩展拒绝请求");
 }

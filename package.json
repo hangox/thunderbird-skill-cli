@@ -1,8 +1,8 @@
 {
   "name": "thunderbird-skill-cli",
-  "version": "0.2.1",
+  "version": "0.4.0",
   "private": true,
-  "description": "面向 Claude Code Skill 的 Thunderbird 原生本地 CLI 与专用扩展 Phase 1 compatibility spike",
+  "description": "面向 Claude Code Skill 的 Thunderbird 原生本地 CLI 与专用扩展：只读/可逆/草稿-外发邮件能力（真实外发默认物理关闭，需用户在扩展 options 页面显式启用可选权限；不含永久删除、watch、日历）",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
@@ -17,8 +17,9 @@
   "scripts": {
     "build": "npm run build:cli && npm run build:extension",
     "build:cli": "tsc -p tsconfig.json",
-    "build:extension": "tsc -p extension/tsconfig.json",
+    "build:extension": "tsc -p extension/tsconfig.json && node scripts/bundle-background.ts",
     "package:extension": "npm run build:extension && node scripts/package-extension.ts",
+    "release": "tsx scripts/release.ts",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p extension/tsconfig.json --noEmit",
     "test": "npm run build && node scripts/package-extension.ts && node --test test/*.test.mjs",
     "test:unit": "npm run build && node scripts/package-extension.ts && node --test test/*.test.mjs",
@@ -29,14 +30,15 @@
     "build:plugin": "npm run build && npm run package:extension && node scripts/build-plugin.ts",
     "validate:plugin": "claude plugin validate ./build/plugin && claude plugin validate .",
     "audit:package": "node scripts/audit-package.ts",
-    "pack:dry-run": "npm pack --dry-run --prefix build/plugin",
-    "release:check": "npm run check && npm test && npm run build:plugin && npm run audit:package"
+    "pack:dry-run": "cd build/plugin && npm pack --dry-run",
+    "release:check": "npm run check && npm test && npm run build:plugin && npm run audit:package && npm run validate:plugin && npm run pack:dry-run"
   },
   "engines": {
     "node": ">=22.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "tsx": "^4.23.1",
     "typescript": "^5.8.0"
   }
 }

@@ -262,7 +262,7 @@ test("S6 CLI 侧 descriptor/status 的 pairingEpoch 不一致会被拒绝", asyn
   const server = createServer((request, response) => {
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({
-      protocolVersion: 1, minCliVersion: "0.2.1", maxCliVersion: "0.2.1", extensionVersion: "0.2.1",
+      protocolVersion: 1, minCliVersion: "0.4.0", maxCliVersion: "0.4.0", extensionVersion: "0.4.0",
       instanceId: "inst_epochmismatch", profileId: `sha256:${"4".repeat(64)}`,
       capabilities: [], pairingState: "paired", pairingEpoch: "9", authorizedAccountRefs: [],
     }));
@@ -271,7 +271,7 @@ test("S6 CLI 侧 descriptor/status 的 pairingEpoch 不一致会被拒绝", asyn
   const { port } = server.address();
   const descriptor = {
     descriptorVersion: 2, protocolVersion: 1, instanceId: "inst_epochmismatch", profileId: `sha256:${"4".repeat(64)}`,
-    profileLabel: "Epoch Fixture", pid: process.pid, port, sessionToken: "5".repeat(64), extensionVersion: "0.2.1",
+    profileLabel: "Epoch Fixture", pid: process.pid, port, sessionToken: "5".repeat(64), extensionVersion: "0.4.0",
     pairingEpoch: "3", startedAt: "2026-07-25T00:00:00.000Z", expiresAt: "2099-07-25T01:00:00.000Z",
   };
   await assert.rejects(fetchStatus(descriptor, 1000), (error) => error.code === "E_PAIRING_CHANGED" && error.retryable === true);
@@ -404,6 +404,98 @@ test("S7 Experiment beginPairing 入口与 HTTP 入口断言完全一致", async
   });
 });
 
+// ---------------------------------------------------------------- Task #48 过期 pending 淘汰
+
+test("Task #48：getState() 淘汰真源里已过期的 pending——不再展示 pendingCode/pendingExpiresAt，pairingState 回退为 unpaired", async (t) => {
+  await withHarness(t, async (harness) => {
+    const identity = makeIdentity();
+    const beginState = await harness.api.beginPairing(identity.clientId, "Ed25519", identity.publicKeySpkiBase64);
+    assert.equal(beginState.pairingState, "pairing");
+    assert.ok(beginState.pendingCode);
+
+    // 直接改写真源里的 expiresAt 到过去——不等真实 PAIRING_TTL_MS（5 分钟）。
+    harness.state.pending.expiresAt = new Date(Date.now() - 1_000).toISOString();
+
+    const after = await harness.api.getState();
+    assert.equal(after.pairingState, "unpaired", "尚未配对过，过期后应回退为 unpaired 而不是继续停留在 pairing");
+    assert.equal(after.pendingIntentId, null);
+    assert.equal(after.pendingCode, null);
+    assert.equal(after.pendingClientId, null);
+    assert.equal(after.pendingExpiresAt, null);
+
+    // confirmPairing 仍必须拒绝——淘汰逻辑不应该意外放行一个已经不存在的 pending。
+    await assert.rejects(harness.api.confirmPairing(beginState.pendingIntentId, beginState.pendingCode));
+  });
+});
+
+// 说明（Task #49 复核修正，第二轮）：此前这里曾直接用测试后门在真源里
+// 人工拼出"已配对 + 又有一个过期 pending 残留"这个组合态，去验证
+// stateView() 里 `state.pairing ? "paired" : "unpaired"` 这条防御性分支。
+// 但生产系统的状态机结构性禁止这个组合出现——`beginPairing()`/POST
+// /v1/pairing/intents 在已配对状态下都会直接拒绝（"已配对状态必须先
+// 显式撤销现有 client"，见 api.js 第 954/1035/1136 行的 E_ALREADY_PAIRED
+// 守卫），没有任何公开入口能让"已配对"与"存在 pending"同时成立。stateView()
+// 里的 paired 回退分支因此保留为纯防御性代码（与既有
+// `/v1/pairing/intents/:id` 端点里同一模式一致，见 api.js 第 1046 行）；
+// 不再用测试后门伪造一个违反安全守卫的状态去覆盖它。
+//
+// 下面两条用例改为分别、只通过公开入口（WebExtension api / 真实签名 HTTP
+// 请求）验证真正的安全不变量：已配对状态下重新发起配对必须被拒绝，且
+// 拒绝之后通过 getState() 这个真实调用方会用到的公开视图（而不是内部
+// state 后门）观测到的 pendingIntentId/pairingState/clientId/pairingEpoch
+// 全部原样不变。
+
+test("Task #48：已配对状态下 WebExtension beginPairing 必须拒绝，getState() 观测到 pendingIntentId 仍为 null 且 pairing/epoch 不变", async (t) => {
+  await withHarness(t, async (harness) => {
+    const identity = makeIdentity();
+    await pair(harness, identity);
+    const before = await harness.api.getState();
+    assert.equal(before.pairingState, "paired");
+    assert.equal(before.clientId, identity.clientId);
+    assert.equal(before.pendingIntentId, null);
+    const epochBefore = before.pairingEpoch;
+
+    await assert.rejects(
+      harness.api.beginPairing(identity.clientId, "Ed25519", identity.publicKeySpkiBase64),
+      /已配对状态必须先显式撤销现有 client/,
+    );
+
+    const after = await harness.api.getState();
+    assert.equal(after.pairingState, "paired", "拒绝后必须仍是 paired，不能退化成 pairing/unpaired");
+    assert.equal(after.clientId, identity.clientId, "clientId 不能因为一次被拒绝的重新配对尝试而改变");
+    assert.equal(after.pendingIntentId, null, "拒绝路径不应该产生任何可观测到的 pending");
+    assert.equal(after.pendingCode, null);
+    assert.equal(after.pairingEpoch, epochBefore, "epoch 不应该因为一次被拒绝的尝试而推进");
+  });
+});
+
+test("Task #48：已配对状态下 HTTP POST /v1/pairing/intents 必须稳定给出 409 E_ALREADY_PAIRED，getState() 观测到状态同样不变", async (t) => {
+  await withHarness(t, async (harness) => {
+    const identity = makeIdentity();
+    await pair(harness, identity);
+    const before = await harness.api.getState();
+    const epochBefore = before.pairingEpoch;
+
+    // 已配对状态下，POST /v1/pairing/intents 要求用当前已配对 client 自己
+    // 的身份签名才能先通过认证层（见 S2 用例"POST 到已配对状态的 pairing
+    // route：签名无效必须先于 E_ALREADY_PAIRED 业务判定被拒"——未注册身份
+    // 的签名在认证层就会被拒成 401，根本到不了这条 409 业务判定），因此这里
+    // 用已配对 client 自己重新尝试配对，稳定验证业务层的 E_ALREADY_PAIRED。
+    const httpAttempt = await handle(harness, buildRequest(harness, {
+      method: "POST", path: PAIRING_PATH, bodyText: pairingBody(identity), identity,
+    }));
+    assert.equal(httpAttempt.status, 409);
+    assert.equal(httpAttempt.code, "E_ALREADY_PAIRED");
+
+    const after = await harness.api.getState();
+    assert.equal(after.pairingState, "paired");
+    assert.equal(after.clientId, identity.clientId);
+    assert.equal(after.pendingIntentId, null, "409 拒绝路径不应该产生任何可观测到的 pending");
+    assert.equal(after.pendingCode, null);
+    assert.equal(after.pairingEpoch, epochBefore);
+  });
+});
+
 test("S7 pairing 持久记录保存 publicKeyAlgorithm，缺失或不匹配时加载失败关闭", async (t) => {
   const harness = await startExperiment();
   t.after(() => harness.cleanup());
@@ -454,13 +546,13 @@ test("S7 CLI 发送的 pairing body 恰好是三键常量", async () => {
   const { port } = server.address();
   await beginPairing({
     descriptorVersion: 2, protocolVersion: 1, instanceId: "inst_bodyshape01", profileId: `sha256:${"6".repeat(64)}`,
-    profileLabel: "Body Fixture", pid: process.pid, port, sessionToken: "7".repeat(64), extensionVersion: "0.2.1",
+    profileLabel: "Body Fixture", pid: process.pid, port, sessionToken: "7".repeat(64), extensionVersion: "0.4.0",
     pairingEpoch: "4", startedAt: "2026-07-25T00:00:00.000Z", expiresAt: "2099-07-25T01:00:00.000Z",
   }, 1000, identity);
   assert.deepEqual(Object.keys(seen.body).sort(), ["clientId", "publicKeyAlgorithm", "publicKeySpkiBase64"]);
   assert.equal(seen.body.publicKeyAlgorithm, "Ed25519");
   assert.equal(seen.headers["x-thunderbird-pairing-epoch"], "4");
-  assert.equal(seen.headers["x-thunderbird-client-version"], "0.2.1");
+  assert.equal(seen.headers["x-thunderbird-client-version"], "0.4.0");
   assert.equal(seen.headers["x-thunderbird-signature-algorithm"], undefined);
   assert.equal(createHash("sha256").update(JSON.stringify(seen.body)).digest("hex"), seen.headers["x-content-sha256"]);
   await new Promise((resolve) => server.close(resolve));
@@ -616,11 +708,11 @@ test("运行时 descriptor 与 status 自报的 extensionVersion 与发布版本
   await withHarness(t, async (harness) => {
     const identity = makeIdentity();
     await pair(harness, identity);
-    assert.equal(harness.descriptor().extensionVersion, "0.2.1");
+    assert.equal(harness.descriptor().extensionVersion, "0.4.0");
     const status = await handle(harness, buildRequest(harness, { identity }));
     assert.equal(status.status, 200);
-    assert.equal(status.body.extensionVersion, "0.2.1");
-    assert.equal(status.body.minCliVersion, "0.2.1");
-    assert.equal(status.body.maxCliVersion, "0.2.1");
+    assert.equal(status.body.extensionVersion, "0.4.0");
+    assert.equal(status.body.minCliVersion, "0.4.0");
+    assert.equal(status.body.maxCliVersion, "0.4.0");
   });
 });

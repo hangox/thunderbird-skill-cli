@@ -41,7 +41,9 @@ thunderbird [--json|--human] [--instance ID|--profile ID] [--timeout MS] <comman
 | `draft open` | `DRAFT_REF` | 只读/UI | Phase 2 |
 | `draft send` | `DRAFT_REF --confirm FILE\|-` | 外发 | Phase 3 |
 | `attachments list` | `MESSAGE_REF` | 只读 | MVP |
-| `attachments save` | `--input FILE\|-` | 可逆/文件写入 | Phase 2 |
+| `attachments save` | `--input FILE\|-`（`attachmentRef` + 本机 `directory`） | 可逆/文件写入 | Phase 2 |
+| `operations get` | `OPERATION_REF` | 只读 | Phase 2 |
+| `operations undo` | `UNDO_TOKEN` | 可逆 | Phase 2 |
 | `calendar list` | 无 | 只读 | Phase 3 |
 | `calendar events` | `--input FILE\|-` | 只读 | Phase 3 |
 | `watch` | `--events ... --duration SEC` | 只读/长运行 | Future |
@@ -108,6 +110,10 @@ thunderbird [--json|--human] [--instance ID|--profile ID] [--timeout MS] <comman
 
 扩展再次读取草稿并比对 revision 与摘要。草稿在预览后发生任何变化，确认立即失效。禁止 `--yes`、`--force`、`skipReview` 绕过。
 
+真实发送在 Thunderbird 侧失败时（`E_INTERNAL`），错误 `message` 只是人类可读文案，不包含可解析的 operation id；程序化查询最新状态必须读取结构化的 `error.details.operationId`（见下方 stdout JSON schema），再调用 `operations get OPERATION_ID` 确认是否已发送成功——`details` 是一个封闭 allowlist，目前唯一合法字段就是 `operationId`，任何其他字段（token/nonce/路径/正文等）都不会出现在这里。
+
+真实发送权限本身是**可选**的（0.4.0 起）：`compose.send` 声明在扩展 `manifest.json` 的 `optional_permissions` 而不是常驻 `permissions` 里，默认不持有，此时 `--confirm` 精确返回 `E_POLICY_DENIED`（不是 `E_INTERNAL`）。用户必须在 Thunderbird 扩展 options 页面显式勾选"外发确认"能力并同意浏览器原生权限弹窗后才会真正解锁；这一步无法由 CLI 代为完成，也不接受任何绕过参数。缺权限时 `confirmationId` 不会被消费，补授权后可直接重试同一个 `--confirm` 输入。
+
 ## stdout JSON schema
 
 成功：
@@ -139,17 +145,35 @@ thunderbird [--json|--human] [--instance ID|--profile ID] [--timeout MS] <comman
   "error": {
     "code": "E_NOT_PAIRED",
     "message": "Thunderbird 扩展尚未与此 CLI 配对",
-    "retryable": false,
-    "details": {"action": "run-setup"}
+    "retryable": false
   }
 }
 ```
+
+`error.details` 是可选的结构化补充信息，只在少数具体场景出现——目前唯一定义的字段是 `operationId`（`draft send --confirm` 真实发送失败即 `E_INTERNAL` 时携带），供调用方直接程序化查询 `operations get`，不需要解析 `message` 文案：
+
+```json
+{
+  "schemaVersion": "1.0",
+  "ok": false,
+  "command": "draft send",
+  "requestId": "cli_...",
+  "error": {
+    "code": "E_INTERNAL",
+    "message": "外发失败：请通过 operations get 查询最新状态，不要自动重试",
+    "retryable": false,
+    "details": {"operationId": "op_..."}
+  }
+}
+```
+
+`details` 是一个封闭 allowlist（不是任意 `Record<string, unknown>`）：目前只放行 `operationId` 一个字段，扩展侧、CLI 传输层各自独立校验格式（必须是合法的 opaque ref），未知/非法字段一律静默丢弃，不会出现在最终 stdout 里。
 
 规则：
 
 - JSON 模式 stdout 恰好输出一个 UTF-8 JSON 文档和换行。
 - 警告仍放 `meta.warnings`；诊断和进度只写 stderr。
-- 不在错误中返回 token、descriptor 路径、正文、完整收件人或账号地址。
+- 不在错误中返回 token、descriptor 路径、正文、完整收件人或账号地址；`details` 同样受此约束——它是一个封闭 allowlist，不是自由文本或任意对象。
 - cursor 是不透明、短期、绑定 query 与 instance 的值。
 - `requestId` 可用于本机审计关联，但不包含 PID、邮箱或路径。
 
@@ -229,12 +253,45 @@ CLI 不暴露可猜测的数据库主键或原始 folder URI。扩展生成带�
 }
 ```
 
-undo token 只能恢复该操作，短期有效、一次性使用，并绑定 instance 与调用者配对。
+undo token 只能恢复该操作，短期有效、一次性使用，并绑定 instance 与调用者配对。用户明确要求撤销时，用 `operations undo UNDO_TOKEN` 提交该 token；过期、已使用或跨 client 均失败关闭，不重试。
+
+## 附件保存：两阶段授权 + 分块拉取 + 本机安全落盘
+
+`attachments save` 的 `--input` 提供 `attachmentRef`（来自 `attachments list`）与本机绝对 `directory`：
+
+```json
+{ "attachmentRef": "attachment_...", "directory": "/Users/me/Downloads" }
+```
+
+`directory` 只在 CLI 本地使用，从不发送给扩展。CLI 依次：
+
+1. 调用 `attachments.save` route 用 `attachmentRef` 换取元数据（`name`/`contentType`/`size`/`digest`）与一次性 `fetchToken`；扩展不接收也不校验任何本机路径，原始附件总大小超过硬上限时直接拒绝签发 token。
+2. 用 `fetchToken` 循环调用 `attachments.fetch`；每次响应是 `{ chunkBase64, offset, chunkBytes, totalBytes, done, nextCursor? }`——`nextCursor` 只在 `done=false` 时存在。CLI 维护独立的 `expectedOffset` 状态机：`offset` 必须等于 `expectedOffset`（不连续即拒绝）、`chunkBytes` 必须等于实际解码字节数、`totalBytes` 全程必须与 `attachments.save` 声明的 `size` 一致、`done=false` 时禁止零字节块（防止无限轮询）、`done`/`nextCursor` 必须互斥。任一违规都失败关闭。
+3. 在目标同目录以 `O_NOFOLLOW|O_EXCL` 创建临时文件，边拉取边写入；全部写完后校验总长度与 `sha256` 摘要，用 `link()`（而非会静默覆盖的 `rename()`）原子发布到最终文件名（取自附件自身名称，规范化、不解释为路径），已存在则拒绝（no-clobber）。
+4. 任何一步失败（长度/摘要不符、offset/chunkBytes/totalBytes/done 状态机违规、token 过期/复用/跨 client、网络中断）都清理临时文件，不留下半成品；已存在的文件不会被覆盖。
+
+目标目录必须是绝对路径、真实存在、解析后不落在敏感系统路径、不是设备/管道/套接字文件；相对路径与路径穿越一律拒绝。
 
 ## `watch` 约束
 
 未来 `watch` 是唯一允许 JSONL 的命令，必须显式声明 `--jsonl`，默认最长 15 分钟并有心跳与事件类型 allowlist。它不是 server 模式，也不接受 stdin RPC。
 
-## 当前骨架边界
+## 当前实现边界（0.3.0）
 
-现有 CLI 已实现 Phase 1 compatibility spike 的全局安全参数解析、descriptor 发现、`status` 与 `doctor` 回环握手；其余命令仍返回 `E_NOT_IMPLEMENTED`。配对、附件和邮箱功能尚未实现，真实扩展监听也未在隔离 Thunderbird profile 中验证。
+CLI 外壳（全局/命令级参数解析、`--input`/stdin 输入、envelope 输出、实例发现与
+client 身份加载）与全部只读/可逆/草稿-外发邮件命令（`accounts list`、`folders
+list`、`search`、`recent`、`message get/open/mark/move/trash`、`draft
+create/update/open/send`、`attachments list/save`、`operations get/undo`）已按
+本文件与 `src/contracts/routes.ts` 冻结的 route 表完整挂载：CLI 会正确构造签名
+请求并发往 Thunderbird 扩展。`attachments save` 是两条 route（`attachments.save`
+授权 + `attachments.fetch` 分块拉取）编排出的单个 CLI 命令，附带本机安全落盘
+（`src/paths.ts`：no-clobber、敏感路径/符号链接/设备文件拒绝、原子发布、失败清理）。
+
+`message delete`（永久删除）、`watch`、`calendar list/events` 三项本轮明确不
+纳入交付范围：不冻结对应 route、不接受任何参数，恒定返回 `E_NOT_IMPLEMENTED`。
+
+邮件数据的实际读写依赖 Thunderbird 扩展侧的邮件适配层（`extension/src/mail/*`，
+只读能力与可逆/草稿-外发能力分别由后续独立任务实现）；适配层接线完成前，已
+挂载命令在真实 Thunderbird 中调用时会从扩展侧收到 `E_NOT_IMPLEMENTED`（501 stub），
+这是扩展侧的状态，不是 CLI 侧的限制。`setup`/`status`/`doctor`/`xpi` 与配对/
+发现/握手底座保持不变。

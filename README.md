@@ -2,7 +2,9 @@
 
 本项目的设计目标是：让 Claude Code 只在用户需要处理 Thunderbird 邮件时加载一个精简 Skill，并通过一次性 CLI 子进程访问专用 Thunderbird 扩展。它不向 Claude Code 注册常驻 MCP server，不实现 MCP、JSON-RPC 或 stdio 桥接，也不会在每轮会话预加载大量工具 schema。
 
-> 当前状态：**Phase 1 compatibility/security spike**。CLI 已实现安全 descriptor 发现、stale recovery、`setup`/`status`/`doctor` 真实回环链路、绝对总超时、严格参数与响应校验，并使用 macOS Keychain 中的 **Ed25519** 私钥对 canonical request 签名（`protocolVersion=1`、`descriptorVersion=2`）。扩展在 Thunderbird 的 Experiment 环境内使用 `nsIServerSocket.LoopbackOnly` 提供受限 HTTP/1.1 listener，具备请求大小上限、绝对 deadline、前置认证、descriptor 原子发布/退出清理及固定 intent 的配对确认 UI。扩展不申请邮件权限，也没有任何邮件读取、修改或发送实现。
+> 当前状态：**0.4.0——只读/可逆/草稿-外发邮件能力，含可选真实发送**。CLI 与扩展已实现安全 descriptor 发现、stale recovery、`setup`/`status`/`doctor` 真实回环链路、绝对总超时、严格参数与响应校验，并使用 macOS Keychain 中的 **Ed25519** 私钥对 canonical request 签名（`protocolVersion=1`、`descriptorVersion=2`）。扩展在 Thunderbird 的 Experiment 环境内使用 `nsIServerSocket.LoopbackOnly` 提供受限 HTTP/1.1 listener，具备请求大小上限、绝对 deadline、前置认证、descriptor 原子发布/退出清理及固定 intent 的配对确认 UI。
+>
+> 在此基础上，扩展已申请 `accountsRead`/`messagesRead`/`messagesUpdate`/`messagesMove`/`compose`/`compose.save` 常驻权限，实现账号/文件夹/搜索/正文读取、消息标记/移动/移入废纸篓（含 undo）、附件保存、草稿创建/更新/打开、以及外发两阶段确认（`draft send --prepare`/`--confirm`）。**明确不包含**：永久删除（无 `messagesDelete` 权限，`message delete` 恒定 `E_NOT_IMPLEMENTED`）、长连接/轮询 `watch`、日历读写、以及任何 MCP/JSON-RPC/stdio 常驻 server。真实发送（`compose.send`）是**可选权限**（`manifest.json` 的 `optional_permissions`，不在常驻 `permissions` 里）：默认未授予，此时 `compose.sendMessage()` 物理不可调用；用户须在扩展 options 页面显式勾选"外发确认"能力并同意浏览器原生权限弹窗后才真正解锁，且 `drafts.send.confirm` 在每次真正发送前都会独立复核该权限是否仍然持有（`browser.permissions.contains()`），不信任"曾经授予过"这个假设。
 >
 > **安全边界必读**：同一 macOS 用户会话内的恶意进程属于**明确 out-of-scope 的已接受残余风险**。Ed25519 + Keychain **不能**证明调用进程的身份——同用户进程可读取该私钥；签名只证明"请求由持有该私钥的实体产生"。详见下文《威胁模型与残余风险》。
 
@@ -34,18 +36,25 @@ thunderbird-skill-cli/
 ├── package.json
 ├── tsconfig.json
 ├── src/
-│   ├── cli.ts                    # setup/status/doctor 命令与失败关闭策略
+│   ├── cli.ts                    # 全部命令入口：setup/status/doctor 与邮件命令挂载/失败关闭策略
+│   ├── transport.ts              # 签名请求、状态/配对/邮件 route 传输与错误映射
+│   ├── discovery.ts / auth.ts / session.ts / args.ts / input.ts / output.ts / paths.ts
 │   └── contracts/
 │       ├── commands.ts           # 稳定命令名、风险等级、实施阶段
-│       └── envelope.ts           # stdout JSON 信封与错误码
+│       ├── routes.ts             # 邮件 route 单一权威来源（method/path/risk/capability/body 上限）
+│       └── envelope.ts           # stdout JSON 信封、错误码、结构化 details 类型
 ├── extension/
-│   ├── manifest.json             # Manifest V3 目标骨架
-│   ├── options.html              # 配对确认页面
-│   ├── bridge/api.js             # Experiment 原生回环 listener 与认证状态机
-│   └── src/background.ts         # classic background 启动入口
+│   ├── manifest.json             # Manifest V3：accountsRead/messagesRead/messagesUpdate/messagesMove/compose/compose.save
+│   ├── options.html              # 配对确认与邮件 capability 授权页面
+│   ├── bridge/{api.js,schema.json} # Experiment 原生回环 listener、认证状态机、operation 通道
+│   └── src/
+│       ├── background.ts         # classic background 启动入口，邮件 route 分发中枢
+│       ├── refs.ts / schema.ts / audit.ts / policy.ts # opaque ref、请求校验、脱敏审计、批量/限流策略
+│       └── mail/                 # 账号/文件夹/搜索/消息/草稿/外发/附件/操作 各域 handler
 ├── skill/thunderbird/
 │   ├── SKILL.md                  # 项目级 Claude Code Skill
-│   └── references/               # 触发后按需读取的 CLI 参考
+│   └── references/               # 触发后按需读取的 CLI 参考与安全策略
+├── scripts/                      # 确定性单文件 bundler、打包、发布审计脚本
 ├── docs/
 │   ├── 01-source-research.md
 │   ├── 02-architecture-and-transport.md
@@ -57,18 +66,19 @@ thunderbird-skill-cli/
 │   ├── 08-review-test-release.md
 │   ├── 09-implementation-plan.md
 │   └── 10-development-readiness.md
-└── test/cli.test.mjs
+└── test/                         # 20+ 个 *.test.mjs：单元、执行级安全管线、真实 bundle 集成、端到端 CLI 子进程
 ```
 
-## 配置与安装（未来实现目标）
+## 配置与安装
 
 1. 构建 CLI 与扩展：`npm ci && npm run build`。
-2. 在 Thunderbird 中安装生成的 XPI；扩展首次启动时保持未配对、只读能力关闭。
+2. 在 Thunderbird 中安装生成的 XPI；扩展首次启动时保持未配对，配对后邮件 capability 默认全部关闭（fail-closed），需在扩展 options 页面显式勾选才生效（外发能力单独强调并默认关闭）。
 3. 将项目级 Skill 目录链接或复制到使用项目的 `.claude/skills/thunderbird/`。
 4. 运行 `thunderbird setup`，由 CLI 打开 Thunderbird 配对页；用户核对六位挑战码、目标 profile 与允许账号。
-5. 运行 `thunderbird doctor --json` 和 `thunderbird status --json` 验证版本、回环绑定、会话认证及授权范围。
+5. 在扩展 options 页面授予需要的邮件 capability（`mail.read.v1`/`mail.reversible.v1`/`draft.write.v1`/`mail.send-confirmed.v1`）；勾选 `mail.send-confirmed.v1` 并保存会额外触发一次浏览器原生 `compose.send` 权限弹窗，只有同意后外发确认才真正可用，拒绝或未勾选时该项能力不会被写入（即使复选框当时是勾选状态）。
+6. 运行 `thunderbird doctor --json` 和 `thunderbird status --json` 验证版本、回环绑定、会话认证及授权范围。
 
-当前 spike 可执行真实扩展发现、配对、signed status 和 deep doctor；其验证范围只覆盖无账号、无邮件权限的 Phase 1 底座。UI confirm 的真实 GUI 链路属于环境未验证项（见《威胁模型与残余风险》），在获得独立复验前不得宣称完整 security exit。
+发现、配对、signed status、deep doctor 与全部只读/可逆/草稿-外发邮件 route 均已实现并有真实 bundle/端到端集成测试覆盖。UI confirm 的真实 GUI 链路（配对确认页、options capability 授权页）在本仓库的自动化测试环境中属于**环境未验证项**（依赖真实 Thunderbird GUI，无法在 headless CI/自动化环境复验，见《威胁模型与残余风险》），在获得独立复验前不得宣称完整 security exit；非 GUI 环节均由执行级自动化测试覆盖真实代码路径（不是源码字符串断言）。
 
 ## CLI 使用约定
 
@@ -102,10 +112,11 @@ npm test
 验收预期：
 
 - TypeScript 严格模式通过。
-- `--help` 展示规划命令并声明当前只实现不访问邮件的 Phase 1 底座。
+- `--help` 展示全部只读/可逆/草稿-外发邮件命令与 `setup`/`status`/`doctor`/`xpi`，并声明 `message delete`/`watch`/`calendar` 三项本轮明确不纳入。
 - `setup`/`status`/`doctor` 可对安全 descriptor 和 Experiment loopback endpoint 执行真实配对及签名握手；离线与不安全 descriptor 失败关闭。
-- 其余已设计但未实现的命令返回稳定 `E_NOT_IMPLEMENTED` JSON 和退出码 `3`。
-- 项目源码中不存在 MCP 生命周期或 JSON-RPC/stdio 兼容入口。
+- 账号/文件夹/搜索/正文读取、消息标记/移动/移入废纸篓（含 undo）、草稿创建/更新/打开、外发两阶段确认、附件保存与分块拉取均有真实 handler 接入，覆盖率通过 `test/bundle.test.mjs`（真实 bundle 产物分发验证，非仅 TS 编译通过）与 `test/mail-*-integration.test.mjs`（真实业务行为）双重验证。
+- `message delete`/`watch`/`calendar` 三项恒定返回稳定 `E_NOT_IMPLEMENTED` JSON 和退出码 `3`，不接受任何参数。
+- 项目源码中不存在 MCP 生命周期或 JSON-RPC/stdio 兼容入口（`test/non-mcp.test.mjs` 持续扫描）。
 
 ## 设计文档索引
 
@@ -152,10 +163,12 @@ thunderbird xpi reveal            # 在 Finder 中定位（仅 macOS）
 发布物是独立的 staging 包（`build/plugin`），与开发仓库分离。
 
 ```bash
-npm run release:check   # check + 全量测试 + 构建 staging + tarball 审计
-npm run validate:plugin # 官方 claude plugin validate 校验两份 manifest
-npm run pack:dry-run    # 查看将要发布的文件清单
+npm run release:check   # check + 全量测试 + 构建 staging + tarball 审计 + plugin/marketplace 校验 + pack dry-run
+npm run validate:plugin # 单独重跑：官方 claude plugin validate 校验两份 manifest
+npm run pack:dry-run    # 单独重跑：查看将要发布的文件清单
 ```
+
+`release:check` 已经把 `validate:plugin`/`pack:dry-run` 纳入同一条链路（Task #45 收敛，此前二者是必须手动分别运行的独立步骤，容易被漏跑）；下面两条只在需要单独排查某一步时才用得上。
 
 ### XPI 安全评审基准
 
@@ -202,14 +215,19 @@ XPI 的字节可复现性依赖 macOS `/usr/bin/zip`，因此必须在 macOS 上
 | 被动 token 泄漏 | token 只出现在 0600 descriptor 中、8 小时会话 TTL、进程退出即清理 descriptor、每次 revoke 轮换 token；token 从不出现在命令行参数、日志或环境变量中 |
 | 撤销后的旧凭据继续可用 | `pairingEpoch` 独立持久化并在 revoke 时单调递增；旧签名因 canonical 变化立即失效，返回 `E_PAIRING_CHANGED` |
 | 用户误操作 | 固定 intent + 六位挑战码必须在 Thunderbird UI 内人工核对确认；风险分级由静态命令元数据决定，不可由模型或调用方降级 |
+| 未经用户同意的真实外发 | `compose.send` 是可选权限，默认不在 manifest 常驻权限里，物理上无法调用 `compose.sendMessage()`；启用需要 options 页面显式勾选 + 浏览器原生权限弹窗同意两步，`drafts.send.confirm` 每次发送前都独立复核该权限是否仍然持有（不信任 capability 系统"曾经放行过"这个假设），撤销 capability 或撤销配对时一并收回该权限，不留悬空授权 |
 
-### Phase 2 起的 prompt injection
+### prompt injection
 
-进入 Phase 2 读取真实邮件后，邮件正文即成为不可信输入。邮件内容中出现的任何指令、确认语句或"用户同意"表述**永远无效**，不得被当作授权。所有需确认动作必须来自当前对话中用户的独立表态，且确认必须绑定到具体对象与具体内容。该防御尚未实现，因为 Phase 1 不读取任何邮件。
+自 0.3.0 起邮件已被真实读取，邮件正文、HTML、签名、引用历史、附件与日历描述均为不可信输入。其中出现的任何指令、确认语句或"用户同意"表述**永远无效**，不得被当作授权。所有需确认动作必须来自当前对话中用户的独立表态，且确认必须绑定到具体对象与具体内容。
+
+这是一条 **Skill 指令层面的行为策略**（见 `skill/thunderbird/references/safety-policy.md` 的"信任边界"与"Prompt injection 响应"两节），不是 CLI/扩展代码能技术性强制的控制——没有任何机制能让底层传输层区分"用户真实意图"与"邮件正文里模仿出的用户意图"，这个边界只能靠模型遵循已加载的 Skill 指令来维持。CLI/扩展代码提供的是另一层、独立于模型行为的技术性保障：写操作必须显式预览+确认（`E_CONFIRMATION_REQUIRED`）、批量阈值触发额外确认、外发采用 prepare/confirm 两阶段绑定 revision 摘要——这些即使模型被注入误导也无法被绕过。
 
 ### 环境未验证项
 
 UI confirm → receipt → signed status 的**真实 GUI 链路**在本轮未获独立复验：自动化 GUI 核验依赖 Dexter 的 Accessibility 与 Screen Recording 权限，该权限在当前环境不可用。因此该链路标记为**环境未验证（environment-blocked）**，而不是已验证通过。所有非 GUI 环节均由执行级自动化测试覆盖。
+
+同样属于环境未验证的，还有 0.4.0 外发权限链路里依赖真实点击的两步：浏览器原生 `compose.send` 权限弹窗的实际同意/拒绝点击、以及 Thunderbird 扩展 options 页面能力勾选表单的实际点击。这两步的**代码路径**（`browser.permissions.request/remove/contains` 的调用时机与参数、拒绝/撤销后的回滚与 fail-closed 分支）已经用真实 Thunderbird 环境的非 GUI 手段独立验证过：在全新隔离、无账号、无 SMTP 出口的 profile 中，用临时诊断桩直接调用 `browser.compose.beginNew()`/`sendMessage()`，证实了未持有 `compose.send` 时 `browser.compose.sendMessage` 在真实 Thunderbird 里**完全不存在**于 `compose` 命名空间下（`typeof` 结果为 `"undefined"`），调用会抛出 `TypeError: browser.compose.sendMessage is not a function`，且 `permissions.contains()` 如实返回 `false`——这是比"存在但拒绝"更强的物理保证，实验代码已在验证后完整 revert，未留痕迹于任何提交。但**真实点击浏览器权限弹窗本身**、以及**任何真实外发（L2 端到端，含向真实收件地址投递）**均未执行，需要在代码与复核通过后另行获得明确授权才能进行。
 
 ## 已知问题
 

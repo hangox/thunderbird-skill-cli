@@ -93,3 +93,35 @@ flowchart LR
 ## 研究结论
 
 技术上最可行的路径是保留“Thunderbird 特权扩展 + loopback 服务 +受保护 descriptor”的核心，但用专用、窄、版本化的 CLI API 替代 MCP bridge。安全基线必须比研究对象更严格，尤其是多实例、Host/Origin、防重放和稳定 token 方面。
+
+## 0.3.0 邮件能力 compatibility spike（2026-07-27）
+
+### 意图
+
+在冻结全部邮件 route 的共享契约（`src/contracts/routes.ts`）并扩出 Experiment 特权桥的路由骨架之前，先确认两件事：(1) 本机可用的 Thunderbird 与文档假设基线是否一致；(2) `extension/bridge/api.js` 现有的 loopback server / 认证 / 防重放管线是否可以在不改变其行为契约的前提下，安全地扩展出一条通用的邮件 route 分发管线。
+
+### 环境事实
+
+本机（hangox-mbp-m5）已安装 `/Applications/Thunderbird.app`，`thunderbird --version` 报告 **Mozilla Thunderbird 153.0**（`CFBundleVersion 15326.7.17`）。docs/09、docs/10 中记录的兼容基线假设是 “Thunderbird 128 ESR + 当前 ESR + 当前 release”；本机实际安装的是当前 release 通道的 153.0，**不是** 128 ESR。docs/02 已经把 `nsIServerSocket.LoopbackOnly` 的可用性验证记为“Thunderbird 153 已验证”，与本机版本一致，因此本轮延续该结论，但 **128 ESR 本身尚未在任何机器上实测**，这一项差距原样保留为未解除的 P0 前提（docs/10 表格），不因本轮工作而视为已解除。
+
+### 本轮实际验证方式与范围
+
+本轮属于隔离环境下的骨架/契约验证，**没有**启动真实 Thunderbird GUI 走完整的人工配对确认流程——原因有二：一是本会话没有可用于安全点击原生确认对话框的交互式桌面权限（与 docs 中“UI confirm 因 Dexter 权限不可用而环境未验证”是同一类限制，见 docs/07、docs/09 的“环境未验证”记法）；二是本轮范围本身就是“契约冻结 + 传输/Experiment 特权桥骨架”，不产出任何真实 mail adapter 代码，没有可供人工确认的实际邮件操作可测。
+
+实际执行的验证是**执行级**而非源码字符串断言：复用仓库既有的 `test/helpers/experiment-harness.mjs`，把改动后的 `extension/bridge/api.js` 原样在 Node VM 中跑起来，用合成 HTTP/1.1 报文与真实 Ed25519 签名驱动其内部真实的 `preflight`/`dispatch` 闭包（细节见 `test/experiment-handler.test.mjs` 中已有的 89 项用例，全部保持通过）。这证明了：
+
+- 新增的邮件 route 通用分发分支（capability 校验 → Content-Type/body 硬上限 → JSON 解析 → 反原型污染守卫 → handler 调用）可以插入现有 `preflight`/`dispatch` 而不改变 `/v1/status`、`/v1/pairing/intents` 既有路径的任何可观察行为（含精确错误码、409/426 语义、epoch 竞态窗口处理）。
+- 未知路径（如 `/v1/unknown`）依旧落在原有的 `route 不允许` fallback，新增分支不会误吞验证。
+- 未配对状态下访问任意邮件 route 必然因 `verifySignature(request, null)` 恒为 `false` 而 401 失败关闭，不需要额外的空指针判断。
+
+**未验证（环境未验证 / environment-blocked）**：真实 Thunderbird（128 ESR 或 153.0）加载该 XPI 后，Experiment API 的 `nsIServerSocket`/`ExtensionCommon.ExtensionAPI` 生命周期、以及未来 mail adapter 将要使用的标准 MailExtension API（`accounts`/`folders`/`messages`/`compose` 等）在真实进程中的可用性与权限提示，本轮未做真机验证；这与 docs/09 已经记录的“环境未验证”项属于同一类型，不是本轮新增的缺口。
+
+### 邮件 API 可行性结论（供 E2/E3/E4 参考，非本轮实现）
+
+Thunderbird 稳定 MailExtension API（`browser.accounts`、`browser.folders`、`browser.messages`（含 `query`/`get`/`update`/`move`/`listAttachments`/`getAttachmentFile`，**不含** `delete`——永久删除本轮范围裁决排除）、`browser.compose`、`browser.identities`）覆盖本轮契约里绝大多数只读/可逆/草稿能力，理论上不需要在 `bridge/api.js` 里为它们各自新写 XPCOM 代码，只需要在 **非特权** MV3 background 侧调用这些 API 并通过特权桥转发结果；这与 `docs/04-extension-design.md` 权限表中“accountsRead/messagesRead/accountsFolders/messagesMove/compose”的既定权限分级一致。真正需要留在 Experiment/XPCOM 特权层的只有：loopback HTTP server 本身（已实现）、Ed25519 签名与 opaque ref 绑定表（本轮已实现，见 `extension/bridge/api.js` 新增的 `createRefStore`）。这一结论未经真机验证，留给实现只读/可逆/草稿能力的后续 PR 在隔离 profile 中复核。
+
+**范围裁决（team-lead，2026-07-27）**：v0.3.0 不实现永久删除（`message delete`）、长连接/轮询式 `watch`、`calendar`。本轮已从 `src/contracts/routes.ts`、`extension/bridge/api.js`、`extension/src/background.ts` 的登记表中移除这三类的 route/handler 骨架，不申请 `messagesDelete` 或任何 calendar 相关权限；`message delete` 与 `watch` 在 `src/contracts/commands.ts` 中保持 `phase: "future"`，对应 CLI 命令继续落到既有的 `E_NOT_IMPLEMENTED` 兜底。永久删除若未来实现，仍必须是 prepare/confirm 两阶段并绑定 Thunderbird UI 人工确认回执，不接受 `--force`/`--yes`；这是独立评审范围，不在本轮内。
+
+### 本轮结论
+
+可以在不破坏 Phase 1 已验证行为契约的前提下，安全地冻结全部邮件能力的 route/capability/opaque ref 契约并搭好 Experiment 特权桥的通用分发骨架；128 ESR 真机验证与真实 GUI 人工确认链路仍是未解除的前提，不应被本轮的执行级测试通过误读为“已在真实 Thunderbird 中验证”。

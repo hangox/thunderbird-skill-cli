@@ -19,7 +19,7 @@ function request(overrides = {}) {
     authorization: `Bearer ${token}`,
     clientName: "thunderbird-skill-cli",
     protocol: "1",
-    clientVersion: "0.2.1",
+    clientVersion: "0.4.0",
     pairingEpoch: "0",
     requestId: "cli_123e4567-e89b-12d3-a456-426614174000",
     timestamp: String(now),

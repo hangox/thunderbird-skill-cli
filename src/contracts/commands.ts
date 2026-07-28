@@ -8,13 +8,20 @@ export interface CommandSpec {
   phase: DeliveryPhase;
 }
 
+// 0.3.0 范围裁决（team-lead，2026-07-27）：本轮交付把 docs/09 原先按
+// phase-2..phase-5 分批交付的邮件能力合并冻结进同一轮契约与传输/Experiment
+// 特权桥实现，明确排除永久删除（message delete）、watch、calendar——三者
+// phase 均为 "future"，src/contracts/routes.ts 不冻结对应 route，CLI 侧
+// 继续走既有 E_NOT_IMPLEMENTED 兜底。`phase` 字段用于对照历史设计文档的
+// 分阶段表述；真正的运行时门禁是 extension/src/protocol.ts 与
+// extension/bridge/api.js 里按 route 静态声明的 risk/capability。
 export const COMMANDS: readonly CommandSpec[] = [
   { path: ["doctor"], summary: "诊断扩展、配对、版本和本地传输", risk: "read", phase: "phase-1" },
   { path: ["setup"], summary: "执行首次配对或重新配对", risk: "reversible", phase: "phase-1" },
   { path: ["status"], summary: "显示 Thunderbird 实例和会话状态", risk: "read", phase: "phase-1" },
   { path: ["xpi", "path"], summary: "输出随包分发的扩展 XPI 路径", risk: "read", phase: "phase-1" },
   { path: ["xpi", "reveal"], summary: "在 Finder 中定位该 XPI（仅 macOS）", risk: "read", phase: "phase-1" },
-  { path: ["accounts", "list"], summary: "列出扩展授权的账号与发件身份", risk: "read", phase: "phase-2" },
+  { path: ["accounts", "list"], summary: "列出扩展授权的账号与发件身份（--include-identities 附带 identity）", risk: "read", phase: "phase-2" },
   { path: ["folders", "list"], summary: "列出邮件文件夹", risk: "read", phase: "phase-2" },
   { path: ["search"], summary: "搜索邮件元数据与预览", risk: "read", phase: "phase-2" },
   { path: ["message", "get"], summary: "按稳定引用读取邮件", risk: "read", phase: "phase-2" },
@@ -27,11 +34,13 @@ export const COMMANDS: readonly CommandSpec[] = [
   { path: ["draft", "create"], summary: "创建草稿，正文只接受文件或标准输入", risk: "reversible", phase: "phase-2" },
   { path: ["draft", "update"], summary: "更新已有草稿", risk: "reversible", phase: "phase-2" },
   { path: ["draft", "open"], summary: "在 Thunderbird 撰写窗口打开草稿", risk: "read", phase: "phase-2" },
-  { path: ["draft", "send"], summary: "核验草稿并经明确确认后外发", risk: "external", phase: "phase-3" },
+  { path: ["draft", "send"], summary: "核验草稿并经明确确认后外发；--prepare 生成摘要、--confirm 提交", risk: "external", phase: "phase-3" },
   { path: ["attachments", "list"], summary: "列出附件元数据", risk: "read", phase: "phase-2" },
-  { path: ["attachments", "save"], summary: "保存附件到显式目标目录", risk: "reversible", phase: "phase-2" },
-  { path: ["calendar", "list"], summary: "列出日历", risk: "read", phase: "phase-3" },
-  { path: ["calendar", "events"], summary: "查询日历事件", risk: "read", phase: "phase-3" },
+  { path: ["attachments", "save"], summary: "保存附件到显式目标目录（no-clobber/敏感路径/符号链接拒绝完全由 CLI 校验，扩展不接收也不校验任何文件系统路径）", risk: "reversible", phase: "phase-2" },
+  { path: ["operations", "get"], summary: "查询可逆/外发操作的当前状态", risk: "read", phase: "phase-2" },
+  { path: ["operations", "undo"], summary: "使用可逆操作返回的一次性 undo token 撤销该操作", risk: "reversible", phase: "phase-2" },
+  { path: ["calendar", "list"], summary: "列出日历", risk: "read", phase: "future" },
+  { path: ["calendar", "events"], summary: "查询日历事件", risk: "read", phase: "future" },
   { path: ["watch"], summary: "以 JSONL 输出有限事件流", risk: "read", phase: "future" },
 ] as const;
 

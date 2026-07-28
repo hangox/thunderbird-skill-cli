@@ -16,9 +16,9 @@ async function liveFixture(t) {
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({
       protocolVersion: 1,
-      minCliVersion: "0.2.1",
-      maxCliVersion: "0.2.1",
-      extensionVersion: "0.2.1",
+      minCliVersion: "0.4.0",
+      maxCliVersion: "0.4.0",
+      extensionVersion: "0.4.0",
     pairingEpoch: "0",
       instanceId: "inst_cli_test1",
       profileId: `sha256:${"1".repeat(64)}`,
@@ -44,7 +44,7 @@ async function liveFixture(t) {
     pid: process.pid,
     port: address.port,
     sessionToken: "2".repeat(64),
-    extensionVersion: "0.2.1",
+    extensionVersion: "0.4.0",
     pairingEpoch: "0",
     startedAt: "2026-07-25T00:00:00.000Z",
     expiresAt: "2099-07-25T01:00:00.000Z",
@@ -53,17 +53,20 @@ async function liveFixture(t) {
   return root;
 }
 
-test("help 展示命令且声明当前不访问邮件", () => {
+test("help 展示命令且声明 delete/watch/calendar 本轮未实现", () => {
   const output = execFileSync(process.execPath, [cli.pathname, "--help"], { encoding: "utf8" });
   assert.match(output, /draft create/);
-  assert.match(output, /不访问邮件/);
+  assert.match(output, /message delete/);
+  assert.match(output, /E_NOT_IMPLEMENTED/);
 });
 
-test("未进入 Phase 1 的命令继续返回稳定未实现错误", () => {
-  const result = spawnSync(process.execPath, [cli.pathname, "--json", "accounts", "list"], { encoding: "utf8" });
-  assert.equal(result.status, 3);
-  const envelope = JSON.parse(result.stdout);
-  assert.equal(envelope.error.code, "E_NOT_IMPLEMENTED");
+test("message delete/watch/calendar 本轮未纳入交付范围，继续返回稳定未实现错误", () => {
+  for (const args of [["message", "delete"], ["watch"], ["calendar", "list"], ["calendar", "events"]]) {
+    const result = spawnSync(process.execPath, [cli.pathname, "--json", ...args], { encoding: "utf8" });
+    assert.equal(result.status, 3, args.join(" "));
+    const envelope = JSON.parse(result.stdout);
+    assert.equal(envelope.error.code, "E_NOT_IMPLEMENTED", args.join(" "));
+  }
 });
 
 test("status 和 doctor 可通过真实 loopback mock 握手", async (t) => {
@@ -108,7 +111,7 @@ test("CLI 保留三类 409 稳定错误码并映射退出码", async (t) => {
         pid: process.pid,
         port: address.port,
         sessionToken: "a".repeat(64),
-        extensionVersion: "0.2.1",
+        extensionVersion: "0.4.0",
     pairingEpoch: "0",
         startedAt: "2026-07-25T00:00:00.000Z",
         expiresAt: "2099-07-25T01:00:00.000Z",
@@ -189,7 +192,7 @@ test("setup 创建 intent 后立即输出挑战码且不静默轮询", async (t)
   await mkdir(join(root, "instances"), { mode: 0o700 });
   await writeFile(join(root, "instances", "inst_cli_setup1.json"), JSON.stringify({
     descriptorVersion: 2, protocolVersion: 1, instanceId: "inst_cli_setup1", profileId: `sha256:${"3".repeat(64)}`,
-    profileLabel: "Setup Fixture", pid: process.pid, port: address.port, sessionToken: "4".repeat(64), extensionVersion: "0.2.1", pairingEpoch: "0",
+    profileLabel: "Setup Fixture", pid: process.pid, port: address.port, sessionToken: "4".repeat(64), extensionVersion: "0.4.0", pairingEpoch: "0",
     startedAt: "2026-07-25T00:00:00.000Z", expiresAt: "2099-07-25T01:00:00.000Z",
   }), { mode: 0o600 });
   t.after(async () => import("node:fs/promises").then(({ rm }) => rm(root, { recursive: true, force: true })));
@@ -218,7 +221,7 @@ test("setup --reconfigure 在服务端仍 paired 时保留旧 Keychain identity"
     requests.push(`${request.method} ${request.url}`);
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({
-      protocolVersion: 1, minCliVersion: "0.2.1", maxCliVersion: "0.2.1", extensionVersion: "0.2.1",
+      protocolVersion: 1, minCliVersion: "0.4.0", maxCliVersion: "0.4.0", extensionVersion: "0.4.0",
       instanceId, profileId, capabilities: [], pairingState: "paired", pairingEpoch: "0", authorizedAccountRefs: [],
     }));
   });
@@ -231,7 +234,7 @@ test("setup --reconfigure 在服务端仍 paired 时保留旧 Keychain identity"
   await mkdir(join(root, "instances"), { mode: 0o700 });
   await writeFile(join(root, "instances", `${instanceId}.json`), JSON.stringify({
     descriptorVersion: 2, protocolVersion: 1, instanceId, profileId,
-    profileLabel: "Reconfigure Fixture", pid: process.pid, port: address.port, sessionToken: "6".repeat(64), extensionVersion: "0.2.1", pairingEpoch: "0",
+    profileLabel: "Reconfigure Fixture", pid: process.pid, port: address.port, sessionToken: "6".repeat(64), extensionVersion: "0.4.0", pairingEpoch: "0",
     startedAt: "2026-07-25T00:00:00.000Z", expiresAt: "2099-07-25T01:00:00.000Z",
   }), { mode: 0o600 });
   t.after(async () => import("node:fs/promises").then(({ rm }) => rm(root, { recursive: true, force: true })));
@@ -265,7 +268,7 @@ test("setup --reconfigure 在服务端 unpaired 时复用旧 identity 发起配�
     if (request.method === "GET") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({
-        protocolVersion: 1, minCliVersion: "0.2.1", maxCliVersion: "0.2.1", extensionVersion: "0.2.1",
+        protocolVersion: 1, minCliVersion: "0.4.0", maxCliVersion: "0.4.0", extensionVersion: "0.4.0",
         instanceId, profileId, capabilities: [], pairingState: "unpaired", pairingEpoch: "0", authorizedAccountRefs: [],
       }));
       return;
@@ -285,7 +288,7 @@ test("setup --reconfigure 在服务端 unpaired 时复用旧 identity 发起配�
   await mkdir(join(root, "instances"), { mode: 0o700 });
   await writeFile(join(root, "instances", `${instanceId}.json`), JSON.stringify({
     descriptorVersion: 2, protocolVersion: 1, instanceId, profileId,
-    profileLabel: "Reconfigure Fixture", pid: process.pid, port: address.port, sessionToken: "8".repeat(64), extensionVersion: "0.2.1", pairingEpoch: "0",
+    profileLabel: "Reconfigure Fixture", pid: process.pid, port: address.port, sessionToken: "8".repeat(64), extensionVersion: "0.4.0", pairingEpoch: "0",
     startedAt: "2026-07-25T00:00:00.000Z", expiresAt: "2099-07-25T01:00:00.000Z",
   }), { mode: 0o600 });
   t.after(async () => import("node:fs/promises").then(({ rm }) => rm(root, { recursive: true, force: true })));
@@ -336,7 +339,7 @@ test("E_PAIRING_CHANGED 映射为 exit 7、保留机器码与恢复提示，且�
   await mkdir(join(root, "instances"), { mode: 0o700 });
   await writeFile(join(root, "instances", "inst_cli_epoch01.json"), JSON.stringify({
     descriptorVersion: 2, protocolVersion: 1, instanceId: "inst_cli_epoch01", profileId: `sha256:${"9".repeat(64)}`,
-    profileLabel: "Epoch Fixture", pid: process.pid, port: address.port, sessionToken: "a".repeat(64), extensionVersion: "0.2.1", pairingEpoch: "0",
+    profileLabel: "Epoch Fixture", pid: process.pid, port: address.port, sessionToken: "a".repeat(64), extensionVersion: "0.4.0", pairingEpoch: "0",
     startedAt: "2026-07-25T00:00:00.000Z", expiresAt: "2099-07-25T01:00:00.000Z",
   }), { mode: 0o600 });
   t.after(async () => import("node:fs/promises").then(({ rm }) => rm(root, { recursive: true, force: true })));
@@ -364,7 +367,7 @@ test("descriptor 的 pairingEpoch 缺失或格式非法时 CLI 拒绝该实例",
   t.after(async () => import("node:fs/promises").then(({ rm }) => rm(root, { recursive: true, force: true })));
   const base = {
     descriptorVersion: 2, protocolVersion: 1, instanceId: "inst_cli_epochbad", profileId: `sha256:${"b".repeat(64)}`,
-    profileLabel: "Bad Epoch", pid: process.pid, port: 49152, sessionToken: "c".repeat(64), extensionVersion: "0.2.1",
+    profileLabel: "Bad Epoch", pid: process.pid, port: 49152, sessionToken: "c".repeat(64), extensionVersion: "0.4.0",
     startedAt: "2026-07-25T00:00:00.000Z", expiresAt: "2099-07-25T01:00:00.000Z",
   };
   for (const variant of [{}, { pairingEpoch: 0 }, { pairingEpoch: "007" }, { pairingEpoch: "-1" }, { pairingEpoch: "1e3" }, { pairingEpoch: "" }]) {

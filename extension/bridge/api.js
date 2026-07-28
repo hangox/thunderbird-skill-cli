@@ -3,8 +3,8 @@
 const RESOURCE_NAME = "thunderbird-skill-bridge";
 const PROTOCOL_VERSION = 1;
 const DESCRIPTOR_VERSION = 2;
-const EXTENSION_VERSION = "0.2.1";
-const CLI_VERSION = "0.2.1";
+const EXTENSION_VERSION = "0.4.0";
+const CLI_VERSION = "0.4.0";
 const PAIRING_TTL_MS = 5 * 60 * 1000;
 const PAIRING_RECEIPT_TTL_MS = 2 * 60 * 1000;
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
@@ -53,8 +53,12 @@ function constantTimeEqual(left, right) {
   return difference === 0;
 }
 
-function errorWithStatus(status, message, code = "E_REJECTED") {
-  return Object.assign(new Error(message), { status, code });
+// details（Task #43，可选）：结构化失败详情，随 HTTP error envelope 一起
+// 透传给 CLI（见 reject()）。绝大多数调用点不传，只有邮件 route 的
+// failOperation 路径（见 operationChannel.fail）会带上一份已经独立校验过
+// allowlist 的对象。
+function errorWithStatus(status, message, code = "E_REJECTED", details) {
+  return Object.assign(new Error(message), { status, code, ...(details ? { details } : {}) });
 }
 
 function isWouldBlock(error) {
@@ -86,7 +90,7 @@ function writeFully(stream, value) {
 }
 
 function reasonPhrase(status) {
-  return ({ 200: "OK", 201: "Created", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout", 409: "Conflict", 413: "Content Too Large", 431: "Request Header Fields Too Large", 500: "Internal Server Error", 503: "Service Unavailable" })[status] || "Rejected";
+  return ({ 200: "OK", 201: "Created", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout", 409: "Conflict", 413: "Content Too Large", 426: "Upgrade Required", 431: "Request Header Fields Too Large", 500: "Internal Server Error", 501: "Not Implemented", 503: "Service Unavailable" })[status] || "Rejected";
 }
 
 function drainResponse(connection, output = connection.output) {
@@ -421,9 +425,9 @@ function createLoopbackServer(preflight, dispatch) {
         try { this.output.asyncWait(this, 0, 0, Services.tm.mainThread); }
         catch (error) { this.abort(error?.result || Cr.NS_ERROR_ABORT); }
       },
-      reject(status, message, code = "E_REJECTED") {
+      reject(status, message, code = "E_REJECTED", details) {
         if (this.closed || this.responseBuffer) return;
-        writeJson(createResponse(this), status, { error: { code, message } });
+        writeJson(createResponse(this), status, { error: { code, message, ...(details ? { details } : {}) } });
       },
       async consume() {
         if (this.closed || this.processing) return;
@@ -457,7 +461,11 @@ function createLoopbackServer(preflight, dispatch) {
           ensureRequestActive(this.request);
           await dispatch(this.request, createResponse(this));
         } catch (error) {
-          if (!this.closed) this.reject(error.status || 400, error.message || "请求被拒绝", error.code);
+          // error.details（Task #43）：邮件 route dispatch 失败时可能携带一份
+          // 已经过 operationChannel.fail() 独立 allowlist 校验的结构化详情；
+          // 其余抛错路径（header/body 解析、preflight）没有这个字段，透传
+          // undefined 是安全的默认行为。
+          if (!this.closed) this.reject(error.status || 400, error.message || "请求被拒绝", error.code, error.details);
         }
       },
       onInputStreamReady(stream) {
@@ -510,7 +518,265 @@ function createLoopbackServer(preflight, dispatch) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// 邮件 route 通用管线：反原型污染的 body 守卫、opaque ref 绑定表、静态
+// route registry，以及把已认证请求转发给 background 执行的 Experiment→
+// background operation 通道（onOperation 事件 + respondToOperation/
+// failOperation 两个回调函数）。这是 extension/src/schema.ts、
+// extension/src/refs.ts、src/contracts/routes.ts 三份纯 TS 参考实现在
+// Experiment 特权作用域下的运行时镜像——这里无法 `import` 编译产物，只能像
+// 本文件既有的 canonical()/isEd25519Spki() 那样手动保持同步，由测试兜底
+// 一致性；listMailRoutes() 额外给 background 提供了一个运行时自检点。
+//
+// 关键边界：本文件（api.js）自身不实现任何邮件业务语义，不调用任何邮件相关
+// 的 XPCOM 组件——认证/capability/body 上限/反原型污染校验通过后就把请求
+// 原样转发给 background，由 background 用标准 MailExtension API 执行业务
+// 逻辑。只读域 7 条 route（accounts.list/folders.list/messages.search/
+// messages.recent/messages.get/messages.open/attachments.list）已在
+// background 侧接入真实 handler；其余 route 仍标记 "not-implemented"，
+// 统一收到 501 E_NOT_IMPLEMENTED，接入方式与已实现的 7 条完全一致（见
+// extension/src/background.ts 的 MAIL_ROUTE_READINESS 派生逻辑）。范围裁决
+// （team-lead，2026-07-27）：v0.3.0 不实现永久删除、watch、calendar，这里
+// 不冻结它们的 route。
+// ---------------------------------------------------------------------------
+
+const MAIL_DANGEROUS_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+// 递归拒绝危险键，是进入任何业务逻辑前的最低限度防原型污染防线；具体字段级
+// 的未知字段/长度/枚举上限校验由各 route 实现 PR 用 extension/src/schema.ts
+// 同款 shape 补齐，这里不预判尚未冻结的业务 schema。
+function assertNoDangerousKeys(value) {
+  if (Array.isArray(value)) { value.forEach((item) => assertNoDangerousKeys(item)); return; }
+  if (!isPlainObject(value)) return;
+  for (const key of Object.keys(value)) {
+    if (MAIL_DANGEROUS_KEYS.has(key)) throw errorWithStatus(400, "请求 body 包含禁止的键名", "E_VALIDATION");
+    assertNoDangerousKeys(value[key]);
+  }
+}
+
+// opaque ref 的唯一真源是 extension/src/mail/state.ts 的 mailRefStore
+// 单例，运行在 background（非特权 MV3 script）里——这是 Task #33 平台层
+// 的显式设计决定：只读/可逆/草稿三个业务域共享同一份 in-memory 绑定表，
+// api.js（特权层）不再持有第二份 RefStore 实例，避免双真源。api.js 只在
+// revokePairing 时通过 onPairingRevoked 事件通知 background 清空其
+// mailRefStore，自身不接触任何 ref 的 issue/resolve。
+
+const MAIL_ROUTE_PREFIX = "/v1/mail/";
+
+// 与 src/contracts/routes.ts 的 MAIL_ROUTES 逐条对应（method 固定 POST）；
+// 修改任一处的 id/path/capability/maxRequestBodyBytes 都必须同步另一处。
+const MAIL_ROUTES = [
+  { id: "accounts.list", path: `${MAIL_ROUTE_PREFIX}accounts.list`, capability: "mail.read.v1", maxRequestBodyBytes: 1024 },
+  { id: "folders.list", path: `${MAIL_ROUTE_PREFIX}folders.list`, capability: "mail.read.v1", maxRequestBodyBytes: 2048 },
+  { id: "messages.search", path: `${MAIL_ROUTE_PREFIX}messages.search`, capability: "mail.read.v1", maxRequestBodyBytes: 8192 },
+  { id: "messages.recent", path: `${MAIL_ROUTE_PREFIX}messages.recent`, capability: "mail.read.v1", maxRequestBodyBytes: 2048 },
+  { id: "messages.get", path: `${MAIL_ROUTE_PREFIX}messages.get`, capability: "mail.read.v1", maxRequestBodyBytes: 2048 },
+  { id: "messages.open", path: `${MAIL_ROUTE_PREFIX}messages.open`, capability: "mail.read.v1", maxRequestBodyBytes: 1024 },
+  { id: "messages.mark", path: `${MAIL_ROUTE_PREFIX}messages.mark`, capability: "mail.reversible.v1", maxRequestBodyBytes: 8192 },
+  { id: "messages.move", path: `${MAIL_ROUTE_PREFIX}messages.move`, capability: "mail.reversible.v1", maxRequestBodyBytes: 8192 },
+  { id: "messages.trash", path: `${MAIL_ROUTE_PREFIX}messages.trash`, capability: "mail.reversible.v1", maxRequestBodyBytes: 8192 },
+  // message delete（永久删除）本轮不实现，无对应 route（team-lead 范围裁决 2026-07-27）。
+  { id: "attachments.list", path: `${MAIL_ROUTE_PREFIX}attachments.list`, capability: "mail.read.v1", maxRequestBodyBytes: 1024 },
+  { id: "attachments.save", path: `${MAIL_ROUTE_PREFIX}attachments.save`, capability: "mail.reversible.v1", maxRequestBodyBytes: 4096 },
+  { id: "attachments.fetch", path: `${MAIL_ROUTE_PREFIX}attachments.fetch`, capability: "mail.reversible.v1", maxRequestBodyBytes: 1024 },
+  { id: "drafts.create", path: `${MAIL_ROUTE_PREFIX}drafts.create`, capability: "draft.write.v1", maxRequestBodyBytes: 8192 },
+  { id: "drafts.update", path: `${MAIL_ROUTE_PREFIX}drafts.update`, capability: "draft.write.v1", maxRequestBodyBytes: 8192 },
+  { id: "drafts.open", path: `${MAIL_ROUTE_PREFIX}drafts.open`, capability: "draft.write.v1", maxRequestBodyBytes: 1024 },
+  { id: "drafts.send.prepare", path: `${MAIL_ROUTE_PREFIX}drafts.send.prepare`, capability: "mail.send-confirmed.v1", maxRequestBodyBytes: 2048 },
+  { id: "drafts.send.confirm", path: `${MAIL_ROUTE_PREFIX}drafts.send.confirm`, capability: "mail.send-confirmed.v1", maxRequestBodyBytes: 2048 },
+  { id: "operations.get", path: `${MAIL_ROUTE_PREFIX}operations.get`, capability: "mail.read.v1", maxRequestBodyBytes: 1024 },
+  { id: "operations.undo", path: `${MAIL_ROUTE_PREFIX}operations.undo`, capability: "mail.reversible.v1", maxRequestBodyBytes: 1024 },
+  // watch（bounded JSONL 事件流）本轮不实现，无对应 route（team-lead 范围裁决 2026-07-27）。
+];
+
+// 与 src/contracts/routes.ts 的 MAIL_CAPABILITIES 逐条对应；setMailCapabilities
+// 用它拒绝任何未知字符串或没有对应 route 的死能力标识。
+const KNOWN_MAIL_CAPABILITIES = new Set(["mail.read.v1", "mail.reversible.v1", "draft.write.v1", "mail.send-confirmed.v1"]);
+
+function findMailRoute(method, path) {
+  if (method !== "POST") return undefined;
+  return MAIL_ROUTES.find((route) => route.path === path);
+}
+
+// background 用 failOperation 报告的错误码只信任这个已知集合，其余一律降级
+// 为 E_INTERNAL/500，防止业务侧的任意字符串直接冒充协议错误码进入 HTTP 响应。
+const MAIL_ROUTE_ERROR_STATUS = {
+  E_NOT_IMPLEMENTED: 501,
+  E_NOT_FOUND: 404,
+  E_POLICY_DENIED: 403,
+  E_CONFIRMATION_REQUIRED: 409,
+  E_VALIDATION: 400,
+  E_TIMEOUT: 408,
+  E_THUNDERBIRD_OFFLINE: 503,
+  E_INTERNAL: 500,
+};
+
+// 结构化失败 details 的平台层 allowlist（Task #43）。background 侧的
+// MailAdapterError 已经在源头（extension/src/mail/state.ts）做过一次
+// allowlist 校验，但 api.js 是特权边界——不信任 detailsJson 这个字符串
+// "既然是 background 发来的就一定干净"，这里独立再校验一遍（与 audit.ts 的
+// sink 不信任调用方类型标注是同一设计原则）。目前只有 operationId 这一个
+// 已知安全字段；新增字段必须显式在这里加校验函数，不能靠"另一侧写对了就行"。
+const MAIL_ERROR_DETAILS_VALIDATORS = {
+  operationId: (value) => typeof value === "string" && /^op_[A-Za-z0-9_-]{16,128}$/.test(value),
+};
+
+/** 把 background 传来的 detailsJson 解析并按 allowlist 过滤；解析失败/不是纯对象/值不合法一律丢弃该字段，绝不因为畸形 details 让整个响应失败。 */
+function sanitizeMailErrorDetails(detailsJson) {
+  if (typeof detailsJson !== "string" || detailsJson.length === 0) return undefined;
+  let parsed;
+  try { parsed = JSON.parse(detailsJson); } catch { return undefined; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const out = {};
+  for (const [key, isValid] of Object.entries(MAIL_ERROR_DETAILS_VALIDATORS)) {
+    if (Object.hasOwn(parsed, key) && isValid(parsed[key])) out[key] = parsed[key];
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+// 只在缺少 ExtensionCommon.EventManager 的环境（当前测试夹具）下生效的等价
+// 实现：register(fire) 在监听者数量 0→1 时调用一次并返回 unregister，
+// 语义与真实 EventManager 完全一致，因此 createOperationChannel 的其余逻辑
+// 不需要区分两条分支。真实 Thunderbird 环境优先使用 ExtensionCommon.EventManager，
+// 这样跨进程的 background↔特权层通信走 WebExtension 既定的结构化克隆通道。
+function createEventManager(context, name, register) {
+  if (typeof ExtensionCommon.EventManager === "function") {
+    return new ExtensionCommon.EventManager({ context, name, register }).api();
+  }
+  const listeners = new Set();
+  let unregister = null;
+  const fire = {
+    async(...args) { for (const listener of listeners) listener(...args); },
+    sync(...args) { for (const listener of listeners) listener(...args); },
+  };
+  return {
+    addListener(listener) {
+      listeners.add(listener);
+      if (listeners.size === 1) unregister = register(fire);
+    },
+    removeListener(listener) {
+      listeners.delete(listener);
+      if (listeners.size === 0 && unregister) { unregister(); unregister = null; }
+    },
+    hasListener(listener) { return listeners.has(listener); },
+  };
+}
+
+// 单向通知事件的通用外壳：没有 respond/fail 回调，只是"告诉 background 发生
+// 了某件事"（目前只用于 onPairingRevoked）。fire() 在没有监听者时静默丢弃——
+// background 还没启动完成时错过一次通知是可接受的，因为它启动后会拿到全新的
+// instanceId/pairingEpoch，不存在"背景错过通知导致 ref 未清空"的窗口。
+function createNotificationEvent(context, name) {
+  let fireEvent = null;
+  const event = createEventManager(context, name, (fire) => {
+    fireEvent = fire;
+    return () => { fireEvent = null; };
+  });
+  return {
+    event,
+    fire(...args) { if (fireEvent) fireEvent.async(...args); },
+  };
+}
+
+// api.js 本身不实现任何邮件业务语义、不调用任何邮件相关的 XPCOM 组件：
+// 认证/capability/body 上限/反原型污染校验通过后，把请求经
+// onOperation 事件转发给 background；background 用标准
+// MailExtension API 执行真正的业务逻辑，再调用 respondToOperation /
+// failOperation 之一唤醒这里挂起的 Promise。这个文件只负责转发、超时与
+// 错误码翻译。clientId/pairingEpoch 随事件一起转发，供 background 侧的
+// opaque ref 绑定使用（取自 api.js 已验证的 securityRequest，不是
+// background 自己声称的值）。
+function createOperationChannel(context) {
+  const pending = new Map(); // token -> { resolve, reject, timer }
+  let fireEvent = null;
+  const event = createEventManager(context, "thunderbirdSkillBridge.onOperation", (fire) => {
+    fireEvent = fire;
+    return () => { fireEvent = null; };
+  });
+  function settle(token, run) {
+    const entry = pending.get(token);
+    if (!entry) return false;
+    pending.delete(token);
+    hiddenWindow.clearTimeout(entry.timer);
+    run(entry);
+    return true;
+  }
+  return {
+    event,
+    hasListener: () => fireEvent !== null,
+    dispatch(token, routeId, capability, bodyJson, clientId, pairingEpoch, deadlineAt) {
+      return new Promise((resolve, reject) => {
+        if (!fireEvent) { reject(errorWithStatus(503, "background 尚未就绪，无法处理邮件能力请求", "E_THUNDERBIRD_OFFLINE")); return; }
+        const remaining = deadlineAt - Date.now();
+        if (remaining <= 0) { reject(errorWithStatus(408, "请求超过总时限", "E_TIMEOUT")); return; }
+        const timer = hiddenWindow.setTimeout(() => {
+          settle(token, (entry) => entry.reject(errorWithStatus(408, "background 未在时限内响应该邮件能力", "E_TIMEOUT")));
+        }, remaining);
+        pending.set(token, { resolve, reject, timer });
+        try {
+          fireEvent.async(token, routeId, capability, bodyJson, clientId, pairingEpoch);
+        } catch {
+          settle(token, (entry) => entry.reject(errorWithStatus(500, "邮件 route 转发失败", "E_INTERNAL")));
+        }
+      });
+    },
+    respond(token, resultJson) {
+      return settle(token, (entry) => {
+        let value;
+        try { value = JSON.parse(resultJson); }
+        catch { entry.reject(errorWithStatus(500, "background 响应不是有效 JSON", "E_INTERNAL")); return; }
+        entry.resolve(value);
+      });
+    },
+    fail(token, errorCode, errorMessage, detailsJson) {
+      return settle(token, (entry) => {
+        const status = Object.hasOwn(MAIL_ROUTE_ERROR_STATUS, errorCode) ? MAIL_ROUTE_ERROR_STATUS[errorCode] : 500;
+        const code = Object.hasOwn(MAIL_ROUTE_ERROR_STATUS, errorCode) ? errorCode : "E_INTERNAL";
+        const details = sanitizeMailErrorDetails(detailsJson);
+        entry.reject(errorWithStatus(status, typeof errorMessage === "string" && errorMessage ? errorMessage : "该邮件能力处理失败", code, details));
+      });
+    },
+    clear(message) {
+      for (const token of [...pending.keys()]) settle(token, (entry) => entry.reject(errorWithStatus(503, message || "服务已停止", "E_THUNDERBIRD_OFFLINE")));
+    },
+  };
+}
+
+// Task #48：过期的 pending 配对请求不应该在任何状态读取路径里继续表现为
+// "仍在等待确认"。此前只有 confirmPairing() 自己被调用时会检查过期
+// （Date.parse(state.pending.expiresAt) <= Date.now()），以及
+// `/v1/pairing/intents/:id` 这一条 HTTP 轮询端点单独复刻了一份淘汰逻辑
+// （见下方约 40 行处）；但 stateView() ——真正被 WebExtension
+// `getState()` API 与 options 页面消费的状态视图——从未做这个检查，导致
+// options 页面在挑战码早已过期之后，仍然原样展示 pendingCode/
+// pendingExpiresAt，`pairingState` 也停留在 "pairing"，与一个仍然有效的
+// pending 在界面上完全无法区分。这里在 stateView 组装前统一淘汰：一旦
+// 发现 state.pending 已过期，直接清空真源（而不是只在返回值里隐藏），
+// pairingState 回退为"已配对"或"未配对"（取决于是否存在已确认的
+// pairing）——与 `/v1/pairing/intents/:id` 端点已经在用的回退逻辑一致。
+// `state.pairing ? "paired" : "unpaired"` 三元里的 "paired" 分支（Task #49
+// 复核确认）在当前状态机下结构性不可达：`beginPairing()`（WebExtension 与
+// HTTP 两个入口）都在已存在 `state.pairing` 时直接 409/throw
+// "已配对状态必须先显式撤销现有 client"（E_ALREADY_PAIRED，见本文件内
+// beginPairing 相关分支），因此"已配对且同时存在 pending"这个组合本身
+// 永远不会真实产生。保留这个分支是纯防御性写法——万一未来状态机允许了
+// 尚未预见的路径产生这种组合（例如某次重构放宽了 E_ALREADY_PAIRED 的
+// 时机），这里也不会错误地把已确认的 pairing 一并清空成 unpaired。不要
+// 因为它当前不可达就删掉，也不要为了"覆盖"它而弱化上述任何一处
+// E_ALREADY_PAIRED 守卫去人为制造这个组合态。
+function evictExpiredPendingIfNeeded(state) {
+  if (state.pending && Date.parse(state.pending.expiresAt) <= Date.now()) {
+    state.pending = null;
+    state.pairingState = state.pairing ? "paired" : "unpaired";
+  }
+}
+
 function stateView(state) {
+  evictExpiredPendingIfNeeded(state);
   return {
     serviceStarted: Boolean(state.server),
     port: state.port,
@@ -520,6 +786,10 @@ function stateView(state) {
     pairingState: state.pairingState,
     pairingEpoch: String(state.pairingEpoch),
     clientId: state.pairing?.clientId ?? null,
+    // options 页面用它渲染/预填已授予的 capability 复选框；未配对，或配对后
+    // 从未在 options 页面保存过能力授权表单时，恒为 confirmPairing 写入的
+    // 空集（默认值）。
+    capabilities: state.pairing?.capabilities ?? [],
     pendingIntentId: state.pending?.intentId ?? null,
     pendingCode: state.pending?.code ?? null,
     pendingClientId: state.pending?.clientId ?? null,
@@ -532,6 +802,10 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
   getAPI(context) {
     resProto.setSubstitutionWithFlags(RESOURCE_NAME, context.extension.rootURI, resProto.ALLOW_CONTENT_ACCESS);
     const storedPairing = loadPairing();
+    // `state` 本身（server/port/pairing/epoch/receipts/nonces 等）必须跨
+    // getAPI() 的多次调用持久，`??=` 对这部分是正确的——它们的生命周期绑定
+    // 的是"这个 Experiment 特权 JS 域还活着"，不是某一次具体的 background
+    // context。
     const state = globalThis.__tbSkillState ??= {
       pairingEpoch: 0n,
       server: null,
@@ -553,6 +827,31 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
       shutdownObserver: null,
       descriptorWatchdog: null,
     };
+    // `operationChannel`/`pairingRevokedEvent` 必须与本次 getAPI() 的
+    // `context` 参数绑定，不能放进上面 `??=` 缓存的 state 里——它们内部的
+    // `createEventManager()` 用真实 `ExtensionCommon.EventManager` 实现时，
+    // EventManager 会把自己的生命周期绑定到构造时传入的那个 `context`：
+    // 该 context（对应一次具体的 classic background 脚本实例化）被销毁时，
+    // EventManager 会自动触发内部 unregister，把 `fireEvent` 清成 null。
+    //
+    // 此前的 bug：`operationChannel: createOperationChannel(context)` 写在
+    // `??=` 对象字面量里，只有第一次 getAPI() 调用（state 还不存在）才会
+    // 真的执行——MV3 background 页在生命周期内被销毁重建时（例如挂起后
+    // 重新唤醒），Thunderbird 会用一个新的 context 再调一次 getAPI()，但
+    // `globalThis.__tbSkillState` 已经存在，`??=` 直接短路，永远复用第一次
+    // 那个绑定在**旧** context 上的 operationChannel。旧 context 销毁时
+    // EventManager 自动 unregister 把 fireEvent 清空，新 background 脚本
+    // 调用 `onOperation.addListener()` 拿到的却还是那个绑定在死 context 上
+    // 的 event 对象——`operationChannel.dispatch()` 里 `if (!fireEvent)`
+    // 恒为真，全部邮件 route 立即 `E_THUNDERBIRD_OFFLINE`，即使 HTTP 服务、
+    // 配对、capabilities（都存在 `state` 里，不受影响）看起来一切正常。
+    //
+    // 修复：每次 getAPI(context) 都必须用**这次**的 context 重新创建两者；
+    // 旧的（如果存在）先 clear() 让其上任何仍然挂起的 operation 立即失败
+    // 关闭，而不是无限期悬挂等一个再也不会来的响应。
+    if (state.operationChannel) state.operationChannel.clear("background context 已重建，旧连接失效");
+    state.operationChannel = createOperationChannel(context);
+    state.pairingRevokedEvent = createNotificationEvent(context, "thunderbirdSkillBridge.onPairingRevoked");
 
     function stopService(reason) {
       if (state.expiryTimer) {
@@ -562,6 +861,7 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
       const server = state.server;
       state.server = null;
       state.sessionToken = null;
+      state.operationChannel.clear(reason ?? "本地会话已停止");
       removeDescriptor(state.instanceId);
       state.descriptorPath = null;
       state.error = reason ?? state.error;
@@ -691,6 +991,20 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
         req.pairingCandidate = candidate;
         return;
       }
+      // 全部邮件 route：无论是否已配对都强制要求签名（requireSignature: true）。
+      // 未配对时 state.pairing 为 null，verifySignature(request, null) 恒为
+      // false，因此自然落到 401，实现"未配对失败关闭"，不需要额外分支。
+      const mailRoute = findMailRoute(req.method, req.path);
+      if (mailRoute) {
+        req.authenticated = await validateAuthenticatedRequest(req, { requireSignature: true });
+        // capability 只看配对时授予的静态集合，绝不接受请求体/请求头自称的能力或风险等级。
+        const granted = state.pairing?.capabilities ?? [];
+        if (!granted.includes(mailRoute.capability)) throw errorWithStatus(403, "当前配对未获授予该能力", "E_POLICY_DENIED");
+        if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(readHeader(req, "Content-Type").trim())) throw errorWithStatus(400, "请求 Content-Type 不合法");
+        if (req.contentLength > mailRoute.maxRequestBodyBytes) throw errorWithStatus(413, "请求 body 超过该 route 的硬上限");
+        req.mailRoute = mailRoute;
+        return;
+      }
       await validateAuthenticatedRequest(req, { requireSignature: Boolean(state.pairing) });
       throw errorWithStatus(400, "route 不允许");
     }
@@ -710,7 +1024,9 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
           extensionVersion: EXTENSION_VERSION,
           instanceId: state.instanceId,
           profileId: state.profileId,
-          capabilities: [],
+          // 账号/能力授权 UI 尚未实现：目前恒为配对记录里的静态 capabilities
+          // （confirmPairing 写入 []），不会凭空出现任何邮件 capability。
+          capabilities: state.pairing?.capabilities ?? [],
           pairingState: state.pairingState,
           pairingEpoch: currentEpoch(),
           authorizedAccountRefs: [],
@@ -764,6 +1080,24 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
           return;
         }
         writeJson(res, 200, { intentId, pairingState: candidate.isReceipt ? candidate.pairingState : "pairing", clientId: candidate.clientId, expiresAt: candidate.expiresAt });
+        return;
+      }
+      if (req.mailRoute) {
+        // preflight 到这里之间也可能发生 revoke：签名验证已通过不代表 epoch 仍然当前。
+        ensureEpochUnchanged(req);
+        const body = readJsonBody(req);
+        assertNoDangerousKeys(body);
+        ensureEpochUnchanged(req);
+        // api.js 到此为止：不解释任何邮件业务语义，只把已认证/已过 capability
+        // 门禁/已过反原型污染校验的请求转发给 background，等待其经
+        // respondToOperation/failOperation 之一唤醒。
+        const token = `opreq_${randomHex(16)}`;
+        const result = await state.operationChannel.dispatch(
+          token, req.mailRoute.id, req.mailRoute.capability, JSON.stringify(body),
+          req.authenticated.securityRequest.clientId, req.authenticated.pairingEpoch, req.deadlineAt,
+        );
+        ensureEpochUnchanged(req);
+        writeJson(res, 200, result);
         return;
       }
       throw errorWithStatus(400, "route 不允许");
@@ -827,7 +1161,10 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
         confirmPairing: async (intentId, code) => {
           if (!state.pending || state.pending.intentId !== intentId || !constantTimeEqual(state.pending.code, code) || Date.parse(state.pending.expiresAt) <= Date.now()) throw new Error("配对确认无效或已过期");
           const confirmed = state.pending;
-          state.pairing = { clientId: confirmed.clientId, publicKeyAlgorithm: confirmed.publicKeyAlgorithm, publicKeySpkiBase64: confirmed.publicKeySpkiBase64, createdAt: new Date().toISOString() };
+          // capabilities 默认空集：配对本身不自动授予任何邮件 capability，
+          // 必须在 extension/options.html 的能力授权表单里显式勾选并保存
+          // （调用 setMailCapabilities）才会生效，此前全部邮件 route 失败关闭。
+          state.pairing = { clientId: confirmed.clientId, publicKeyAlgorithm: confirmed.publicKeyAlgorithm, publicKeySpkiBase64: confirmed.publicKeySpkiBase64, capabilities: [], createdAt: new Date().toISOString() };
           savePairing(state.pairing);
           state.receipts.set(confirmed.intentId, {
             intentId: confirmed.intentId,
@@ -848,6 +1185,16 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
           // 这样即使在中途崩溃，重启后 epoch 也只会更大，绝不会让旧签名重新生效。
           state.pairingEpoch += 1n;
           savePairingEpoch(state.pairingEpoch);
+          // 撤销前发起、仍在等待 background 响应的 operation 必须立即失败，
+          // 不能悬挂到各自的请求 deadline 才超时——那样会让调用方误以为还在
+          // 正常处理，也会让已经不再合法的 client 继续占用挂起槽位。
+          state.operationChannel.clear("配对已被撤销");
+          // opaque ref 的唯一真源在 background（mail/state.ts 的
+          // mailRefStore），api.js 不持有第二份 ref 表；这里只负责把"配对
+          // 撤销/epoch 已推进"这件事通知给 background，由它清空自己的
+          // mailRefStore——否则旧 client 的 ref 会在重新配对的新 client
+          // 名下被错误复用。
+          state.pairingRevokedEvent.fire();
           clearPairing();
           state.pairing = null;
           state.pending = null;
@@ -855,6 +1202,31 @@ var thunderbirdSkillBridge = class extends ExtensionCommon.ExtensionAPI {
           state.pairingState = "revoked";
           state.sessionToken = randomHex(32);
           refreshDescriptor();
+          return stateView(state);
+        },
+        // background 用它在启动时自检自己的 route 登记表是否与这里的
+        // MAIL_ROUTES 静态表一致，把"两份手写列表可能漂移"变成可验证的运行时断言。
+        listMailRoutes: async () => MAIL_ROUTES.map((route) => route.id),
+        // background 处理完（或判定未实现/拒绝）一条转发来的邮件 route 请求后
+        // 调用两者之一，唤醒 dispatch() 里挂起的 Promise；找不到对应 token
+        // （已超时/已响应过）时静默忽略，不对 background 暴露内部时序细节。
+        respondToOperation: async (token, resultJson) => { state.operationChannel.respond(token, resultJson); },
+        failOperation: async (token, errorCode, errorMessage, detailsJson) => { state.operationChannel.fail(token, errorCode, errorMessage, detailsJson); },
+        onOperation: state.operationChannel.event,
+        // 配对撤销（等价于 epoch 推进）时触发，background 收到后必须清空
+        // 其持有的 mailRefStore；参见 revokePairing 里的 fire() 调用。
+        onPairingRevoked: state.pairingRevokedEvent.event,
+        // 写入已配对 client capabilities 的唯一入口；extension/options.html
+        // 的能力授权表单（extension/src/options.ts）调用它。覆盖式写入
+        // （不是增量 add），未勾选/未保存过时 capabilities 恒为
+        // confirmPairing 写入的空集，全部邮件 route 因此保持失败关闭。
+        setMailCapabilities: async (capabilities) => {
+          if (!state.pairing) throw new Error("未配对，无法设置 capabilities");
+          if (!Array.isArray(capabilities) || !capabilities.every((value) => typeof value === "string" && KNOWN_MAIL_CAPABILITIES.has(value))) {
+            throw new Error("capabilities 必须是已知能力标识组成的数组");
+          }
+          state.pairing = { ...state.pairing, capabilities: [...new Set(capabilities)] };
+          savePairing(state.pairing);
           return stateView(state);
         },
       },

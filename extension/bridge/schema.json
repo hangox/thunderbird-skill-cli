@@ -39,6 +39,65 @@
         "type": "function",
         "async": true,
         "parameters": []
+      },
+      {
+        "name": "listMailRoutes",
+        "type": "function",
+        "async": true,
+        "parameters": [],
+        "description": "返回 api.js 内 MAIL_ROUTES 静态表的 route id 列表，供 background 侧自检其 handler 登记表是否与之一致。"
+      },
+      {
+        "name": "respondToOperation",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          { "name": "token", "type": "string" },
+          { "name": "resultJson", "type": "string" }
+        ],
+        "description": "background 完成某个 operation（一次邮件 route 请求）的处理后调用，携带 JSON 序列化的成功结果，唤醒 api.js 中挂起的对应请求。"
+      },
+      {
+        "name": "failOperation",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          { "name": "token", "type": "string" },
+          { "name": "errorCode", "type": "string" },
+          { "name": "errorMessage", "type": "string" },
+          { "name": "detailsJson", "type": "string", "optional": true }
+        ],
+        "description": "background 判定某个 operation 失败（含未实现）时调用，唤醒 api.js 中挂起的对应请求并以该错误码/信息响应 CLI。detailsJson（Task #43，可选）是结构化失败详情的 JSON 字符串（例如 drafts.send.confirm 失败时的 operationId），供调用方程序化消费而不必解析 errorMessage 文案；api.js 会独立按固定 allowlist 校验，未知/非法字段静默丢弃。"
+      },
+      {
+        "name": "setMailCapabilities",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          { "name": "capabilities", "type": "array", "items": { "type": "string" } }
+        ],
+        "description": "把给定 capability 集合写入当前已配对 client 的持久授权记录（覆盖式，非增量）。未配对时拒绝。这是账号/能力授权 UI（Task #30/mail-write）写入 capabilities 的唯一入口；E1 只提供该入口，不实现调用它的 UI。生产环境默认集合为空（fail-closed）。"
+      }
+    ],
+    "events": [
+      {
+        "name": "onOperation",
+        "type": "function",
+        "description": "api.js 完成认证/capability/body 上限校验后，把已授权的邮件 route 请求作为一个 operation 转发给 background；background 必须调用 respondToOperation 或 failOperation 之一来响应，api.js 本身不解释任何邮件业务语义。clientId/pairingEpoch 取自 api.js 已验证的 req.authenticated.securityRequest，供 background 侧的 opaque ref 绑定使用，不是 background 自己声称的值。",
+        "parameters": [
+          { "name": "token", "type": "string" },
+          { "name": "routeId", "type": "string" },
+          { "name": "capability", "type": "string" },
+          { "name": "bodyJson", "type": "string" },
+          { "name": "clientId", "type": "string" },
+          { "name": "pairingEpoch", "type": "string" }
+        ]
+      },
+      {
+        "name": "onPairingRevoked",
+        "type": "function",
+        "description": "配对被撤销（含 pairingEpoch 推进）时触发。background 收到后必须清空其持有的全部 opaque ref（当前设计里配对撤销即等价于 epoch 推进，两者是同一事件，不存在只推进 epoch 不撤销配对的路径）。",
+        "parameters": []
       }
     ]
   }

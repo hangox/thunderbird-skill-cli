@@ -15,7 +15,7 @@ function descriptor(overrides = {}) {
     pid: process.pid,
     port: 49152,
     sessionToken: "b".repeat(64),
-    extensionVersion: "0.2.1",
+    extensionVersion: "0.4.0",
     pairingEpoch: "0",
     startedAt: "2026-07-25T00:00:00.000Z",
     expiresAt: "2099-07-25T01:00:00.000Z",

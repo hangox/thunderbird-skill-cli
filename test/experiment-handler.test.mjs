@@ -404,6 +404,62 @@ test("S7 Experiment beginPairing 入口与 HTTP 入口断言完全一致", async
   });
 });
 
+// ---------------------------------------------------------------- Task #48 过期 pending 淘汰
+
+test("Task #48：getState() 淘汰真源里已过期的 pending——不再展示 pendingCode/pendingExpiresAt，pairingState 回退为 unpaired", async (t) => {
+  await withHarness(t, async (harness) => {
+    const identity = makeIdentity();
+    const beginState = await harness.api.beginPairing(identity.clientId, "Ed25519", identity.publicKeySpkiBase64);
+    assert.equal(beginState.pairingState, "pairing");
+    assert.ok(beginState.pendingCode);
+
+    // 直接改写真源里的 expiresAt 到过去——不等真实 PAIRING_TTL_MS（5 分钟）。
+    harness.state.pending.expiresAt = new Date(Date.now() - 1_000).toISOString();
+
+    const after = await harness.api.getState();
+    assert.equal(after.pairingState, "unpaired", "尚未配对过，过期后应回退为 unpaired 而不是继续停留在 pairing");
+    assert.equal(after.pendingIntentId, null);
+    assert.equal(after.pendingCode, null);
+    assert.equal(after.pendingClientId, null);
+    assert.equal(after.pendingExpiresAt, null);
+
+    // confirmPairing 仍必须拒绝——淘汰逻辑不应该意外放行一个已经不存在的 pending。
+    await assert.rejects(harness.api.confirmPairing(beginState.pendingIntentId, beginState.pendingCode));
+  });
+});
+
+test("Task #48：已配对状态下若真源里仍残留一个过期 pending，getState() 淘汰后必须回退为 paired（而不是错误地变成 unpaired）", async (t) => {
+  // 说明：`beginPairing()`/POST /v1/pairing/intents 在已配对状态下会直接
+  // 409（"已配对状态必须先显式撤销现有 client"，见 api.js 第 954/1035/1136
+  // 行），因此"已配对 + 又产生一个新 pending"这个组合在当前系统里没有任何
+  // 公开入口能真实触达。stateView() 里的 `state.pairing ? "paired" :
+  // "unpaired"` 分支是防御性代码（且与既有 `/v1/pairing/intents/:id` 端点
+  // 里同一模式的既有逻辑保持一致，见 api.js 第 1046 行）——这里直接用测试
+  // 后门在真源里人工拼出这个当前不可达、但代码里显式处理了的组合状态，
+  // 验证这条分支本身没有"淘汰过期 pending 时把已确认的 pairing 一并冲掉"
+  // 这种潜在回归，而不是只覆盖"从未配对过"这一条路径。
+  await withHarness(t, async (harness) => {
+    const identity = makeIdentity();
+    await pair(harness, identity);
+    assert.equal((await harness.api.getState()).pairingState, "paired");
+
+    harness.state.pending = {
+      intentId: `intent_${"b".repeat(32)}`,
+      code: "999999",
+      clientId: "client_other",
+      publicKeyAlgorithm: "Ed25519",
+      publicKeySpkiBase64: identity.publicKeySpkiBase64,
+      expiresAt: new Date(Date.now() - 1_000).toISOString(),
+    };
+    harness.state.pairingState = "pairing";
+
+    const after = await harness.api.getState();
+    assert.equal(after.pairingState, "paired", "已有确认过的 pairing 时，过期的残留 pending 淘汰后应该回退为 paired，不能丢失既有配对");
+    assert.equal(after.clientId, identity.clientId);
+    assert.equal(after.pendingCode, null);
+  });
+});
+
 test("S7 pairing 持久记录保存 publicKeyAlgorithm，缺失或不匹配时加载失败关闭", async (t) => {
   const harness = await startExperiment();
   t.after(() => harness.cleanup());

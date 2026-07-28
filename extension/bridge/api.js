@@ -746,7 +746,27 @@ function createOperationChannel(context) {
   };
 }
 
+// Task #48：过期的 pending 配对请求不应该在任何状态读取路径里继续表现为
+// "仍在等待确认"。此前只有 confirmPairing() 自己被调用时会检查过期
+// （Date.parse(state.pending.expiresAt) <= Date.now()），以及
+// `/v1/pairing/intents/:id` 这一条 HTTP 轮询端点单独复刻了一份淘汰逻辑
+// （见下方约 40 行处）；但 stateView() ——真正被 WebExtension
+// `getState()` API 与 options 页面消费的状态视图——从未做这个检查，导致
+// options 页面在挑战码早已过期之后，仍然原样展示 pendingCode/
+// pendingExpiresAt，`pairingState` 也停留在 "pairing"，与一个仍然有效的
+// pending 在界面上完全无法区分。这里在 stateView 组装前统一淘汰：一旦
+// 发现 state.pending 已过期，直接清空真源（而不是只在返回值里隐藏），
+// pairingState 回退为"已配对"或"未配对"（取决于是否存在已确认的
+// pairing）——与 `/v1/pairing/intents/:id` 端点已经在用的回退逻辑一致。
+function evictExpiredPendingIfNeeded(state) {
+  if (state.pending && Date.parse(state.pending.expiresAt) <= Date.now()) {
+    state.pending = null;
+    state.pairingState = state.pairing ? "paired" : "unpaired";
+  }
+}
+
 function stateView(state) {
+  evictExpiredPendingIfNeeded(state);
   return {
     serviceStarted: Boolean(state.server),
     port: state.port,

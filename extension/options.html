@@ -21,6 +21,7 @@
     .capability-option-warning { padding: 10px 12px; border: 1px solid #f0c36d; border-radius: 8px; background: #fff9ee; }
     .capability-option-warning .label { color: #92400e; }
     #capabilities-status { min-height: 1.4em; color: #526078; font-size: 14px; }
+    #pairing-error { min-height: 1.4em; color: #b42318; font-size: 14px; }
   </style>
 </head>
 <body>
@@ -32,9 +33,11 @@
       <dt>配对状态</dt><dd id="pairing-state">加载中</dd>
       <dt>授权 client</dt><dd id="client-id">加载中</dd>
       <dt>待核对挑战码</dt><dd id="pairing-code">加载中</dd>
+      <dt>挑战码状态</dt><dd id="pairing-expiry">—</dd>
     </dl>
     <button id="confirm-pairing" disabled>确认当前配对</button>
     <button id="revoke-pairing" disabled>撤销配对</button>
+    <p id="pairing-error" role="alert"></p>
     <p>确认前请在终端核对相同六位码。</p>
 
     <section>

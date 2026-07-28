@@ -2,6 +2,8 @@ const serviceState = document.querySelector<HTMLElement>("#service-state");
 const pairingState = document.querySelector<HTMLElement>("#pairing-state");
 const clientId = document.querySelector<HTMLElement>("#client-id");
 const pairingCode = document.querySelector<HTMLElement>("#pairing-code");
+const pairingExpiry = document.querySelector<HTMLElement>("#pairing-expiry");
+const pairingError = document.querySelector<HTMLElement>("#pairing-error");
 const confirmButton = document.querySelector<HTMLButtonElement>("#confirm-pairing");
 const revokeButton = document.querySelector<HTMLButtonElement>("#revoke-pairing");
 const capabilitiesForm = document.querySelector<HTMLFormElement>("#capabilities-form");
@@ -12,9 +14,59 @@ type DisplayedIntent = Readonly<{
   intentId: string;
   code: string;
   clientId: string | null;
+  expiresAt: string | null;
 }>;
 
 let displayedIntent: DisplayedIntent | null = null;
+
+// Task #48：挑战码过期交互修复。此前 render() 只是把 state.pendingCode 原样
+// 显示出来、confirmButton 只在"完全没有 pending"时禁用——一个已经过期但
+// 尚未被后台清理的 pending（confirmPairing 会在过期时抛错，见 api.js
+// `Date.parse(state.pending.expiresAt) <= Date.now()` 分支）在 UI 上和一个
+// 仍然有效的 pending 长得一模一样，用户没有任何线索知道"已经点不动了"。
+//
+// 这里用一个本地倒计时（每秒 tick 一次）持续对照 displayedIntent.expiresAt
+// 与真实时钟：仍在有效期内时显示剩余秒数；一旦本地判定已过期，立即禁用确认
+// 按钮、把状态区域标成"已过期"，并触发一次 refresh() 向后台核实最新状态——
+// 不假设后台会主动清理过期 pending，前端自己先 fail-closed。这个 refresh()
+// 调用只发生在"倒计时 tick 观察到刚跨越过期线"这一个时刻，不会在 render()
+// 每次被调用时都重新 refresh（否则一个后台从不清理的过期 pending 会导致
+// render→refresh→render 无限循环）。
+let countdownTimer: ReturnType<typeof setInterval> | null = null;
+const COUNTDOWN_TICK_MS = 1000;
+
+function clearCountdownTimer(): void {
+  if (countdownTimer !== null) {
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+  }
+}
+
+// Task #48：既显示可读的本地到期时刻（用户核对"是不是已经过了那个点"），
+// 也显示秒级倒计时（用户核对"还剩多久"）——只给相对剩余秒数不够直观：
+// 页面可能已经在后台停留了很久，用户单看"剩余 X 秒"无法判断这是不是一个
+// 刚刷新出来的新数字。
+function formatExpiryStatus(expiresAtIso: string, remainingMs: number): string {
+  const localTime = new Date(expiresAtIso).toLocaleTimeString();
+  return `到期时间 ${localTime}（剩余 ${Math.max(0, Math.ceil(remainingMs / 1000))} 秒）`;
+}
+
+function markExpiredAndResync(): void {
+  clearCountdownTimer();
+  if (confirmButton) confirmButton.disabled = true;
+  if (pairingExpiry) pairingExpiry.textContent = "已过期，请重新发起配对";
+  void refresh();
+}
+
+function tickCountdown(): void {
+  if (!displayedIntent?.expiresAt) return;
+  const remainingMs = Date.parse(displayedIntent.expiresAt) - Date.now();
+  if (remainingMs <= 0) {
+    markExpiredAndResync();
+    return;
+  }
+  if (pairingExpiry) pairingExpiry.textContent = formatExpiryStatus(displayedIntent.expiresAt, remainingMs);
+}
 
 // 与 src/contracts/routes.ts 的 MAIL_CAPABILITIES 是同一份契约的镜像（options
 // 页面运行在普通网页上下文，无法跨 extension/src 与 src 两个独立 tsconfig
@@ -47,10 +99,36 @@ function render(state: ThunderbirdSkillBridgeState): void {
   if (pairingState) pairingState.textContent = state.pairingState;
   if (clientId) clientId.textContent = state.clientId ?? "未授权";
   if (pairingCode) pairingCode.textContent = state.pendingCode ?? "无待确认配对";
+
+  clearCountdownTimer();
   displayedIntent = state.pendingIntentId && state.pendingCode
-    ? Object.freeze({ intentId: state.pendingIntentId, code: state.pendingCode, clientId: state.pendingClientId })
+    ? Object.freeze({ intentId: state.pendingIntentId, code: state.pendingCode, clientId: state.pendingClientId, expiresAt: state.pendingExpiresAt })
     : null;
-  if (confirmButton) confirmButton.disabled = !displayedIntent;
+
+  if (!displayedIntent) {
+    if (confirmButton) confirmButton.disabled = true;
+    if (pairingExpiry) pairingExpiry.textContent = "—";
+  } else if (!displayedIntent.expiresAt) {
+    // 理论上 confirmPairing 写入的 pending 恒带 expiresAt；仍保留这条兜底
+    // 分支只是为了不让缺失字段的异常数据把整页渲染打挂。
+    if (confirmButton) confirmButton.disabled = false;
+    if (pairingExpiry) pairingExpiry.textContent = "无到期时间信息";
+  } else {
+    const remainingMs = Date.parse(displayedIntent.expiresAt) - Date.now();
+    if (remainingMs <= 0) {
+      if (confirmButton) confirmButton.disabled = true;
+      if (pairingExpiry) pairingExpiry.textContent = "已过期，请重新发起配对";
+      // 注意：这里不调用 refresh()——初次渲染就已过期（例如页面重新加载
+      // 时才发现）不代表后台状态本身有变化，重复 refresh 只会拿到同样已
+      // 过期的 pending，陷入 render→refresh→render 空转。只有下面倒计时
+      // tick 观察到"刚刚跨越过期线"这一次性事件才需要主动核实后台。
+    } else {
+      if (confirmButton) confirmButton.disabled = false;
+      if (pairingExpiry) pairingExpiry.textContent = formatExpiryStatus(displayedIntent.expiresAt, remainingMs);
+      countdownTimer = setInterval(tickCountdown, COUNTDOWN_TICK_MS);
+    }
+  }
+
   if (revokeButton) revokeButton.disabled = state.pairingState !== "paired";
 
   const paired = state.pairingState === "paired";
@@ -68,15 +146,44 @@ async function refresh(): Promise<void> {
   render(await browser.thunderbirdSkillBridge.getState());
 }
 
+// Task #48：`confirmInFlight` 防止用户在一次确认请求尚未落地前重复点击
+// （例如网络/IPC 有延迟时连续点两下）产生第二次并发的 confirmPairing 调用。
+// 必须在 click handler 一开始、任何 await 之前就同步置位并禁用按钮——
+// 如果放在第一个 await 之后才置位，两次几乎同时发生的点击都可能在各自的
+// await 前读到 confirmInFlight === false，从而双双通过这道门。
+let confirmInFlight = false;
+
 confirmButton?.addEventListener("click", async () => {
   const shown = displayedIntent;
-  if (!shown) return;
-  const current = await browser.thunderbirdSkillBridge.getState();
-  if (current.pendingIntentId !== shown.intentId || current.pendingCode !== shown.code || current.pendingClientId !== shown.clientId) {
-    render(current);
-    return;
+  if (!shown || confirmInFlight) return;
+  confirmInFlight = true;
+  if (confirmButton) confirmButton.disabled = true;
+  if (pairingError) pairingError.textContent = "";
+  try {
+    const current = await browser.thunderbirdSkillBridge.getState();
+    if (current.pendingIntentId !== shown.intentId || current.pendingCode !== shown.code || current.pendingClientId !== shown.clientId) {
+      render(current);
+      return;
+    }
+    // Task #48：此前这里没有 try/catch——confirmPairing 在挑战码过期（或
+    // intentId/code 校验失败）时会 reject（见 api.js confirmPairing 分支），
+    // 而这个未捕获的 rejection 在 click handler 里静默消失，用户点了按钮却
+    // 界面毫无反应，唯一线索是浏览器控制台里一条不会展示给用户看的
+    // unhandled rejection。现在捕获异常、把 message 展示在页面上，并
+    // refresh() 拉取权威状态重新渲染（不假设这次失败前端已经知道后台的
+    // 最新真实状态）。
+    try {
+      render(await browser.thunderbirdSkillBridge.confirmPairing(shown.intentId, shown.code));
+    } catch (error) {
+      if (pairingError) pairingError.textContent = `确认失败：${error instanceof Error ? error.message : "未知错误"}`;
+      await refresh();
+    }
+  } finally {
+    // render()/refresh() 在上面各分支里已经根据最新状态设置了正确的
+    // disabled 值（例如确认成功后不再有 displayedIntent、或失败后维持
+    // 原有过期/有效判定）；这里只需要放开重入门禁本身。
+    confirmInFlight = false;
   }
-  render(await browser.thunderbirdSkillBridge.confirmPairing(shown.intentId, shown.code));
 });
 
 revokeButton?.addEventListener("click", async () => {

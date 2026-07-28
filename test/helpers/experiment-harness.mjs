@@ -201,6 +201,13 @@ export async function startExperiment(options = {}) {
     prefs,
     port: started.port,
     get api() { return api; },
+    // Task #48 测试专用后门：直接读取 api.js 内部真实的 `state` 对象
+    // （`globalThis.__tbSkillState`），供需要构造"挑战码已过期"这类场景的
+    // 测试直接改写 `state.pending.expiresAt` 为过去的时间戳——真实
+    // PAIRING_TTL_MS 是 5 分钟，测试不应该也不需要真的等 5 分钟真实时间。
+    // 只暴露读取（能拿到的是同一个可变对象的引用，调用方可以直接改它的
+    // 字段），不新增任何写入包装逻辑，尽量不引入需要额外维护的抽象。
+    get state() { return sandbox.__tbSkillState; },
     get preflight() { return captured.preflight; },
     get dispatch() { return captured.dispatch; },
     // 真实 HTTP parser 入口：把原始 HTTP/1.1 报文交给 api.js 内部真正的

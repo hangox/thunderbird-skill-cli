@@ -394,6 +394,35 @@ test("MV3 background context 重建后，旧 context 上的 onOperation 监听�
   });
 });
 
+test("MV3 background context 重建时，重建前已发出、仍在等待响应的 operation 立即失败关闭，不悬挂到 deadline（in-flight pending 必须 settle）", async (t) => {
+  await withHarness(t, async (harness) => {
+    const identity = makeIdentity();
+    await pair(harness, identity);
+    await grantMailCapabilities(harness, ["mail.read.v1"]);
+
+    // 在 onOperation 监听器内部触发 reconnect，保证此刻请求已经真正通过了
+    // preflight 并在 dispatch() 里把这个 token 记进了 operationChannel 内部
+    // 的 pending Map（dispatch() 正是在调用 fireEvent 之后才 pending.set 的，
+    // onOperation 正是 fireEvent 触发的）——这才是"background context 在
+    // 一个请求处理中途被销毁重建"，而不是更早阶段就撞上其它生命周期事件。
+    // 故意不在监听器里 respond/fail：要验证的是重建本身（state.operationChannel
+    // 被替换前对旧 channel 调用的 clear()）让它失败关闭，不是靠后续还有正常
+    // 响应路径掩盖问题。
+    harness.api.onOperation.addListener(() => {
+      harness.reconnectBackgroundContext();
+    });
+
+    const startedAt = Date.now();
+    // deadline 故意设很长：如果重建没有让旧 channel 上的 in-flight pending
+    // 立即失败关闭，这里会因为悬挂到 dispatch() 自己的 408 超时定时器（而不是
+    // 立即的 503）才返回，暴露"重建瞬间未 settle 旧 pending"这个缺口。
+    const result = await handle(harness, buildRequest(harness, { method: "POST", path: ACCOUNTS_LIST_PATH, bodyText: "{}", identity, deadlineMs: 5_000 }));
+    assert.equal(result.status, 503, `修复前会悬挂到 5s deadline 才 408 超时；实际 status=${result.status} code=${result.code}`);
+    assert.equal(result.code, "E_THUNDERBIRD_OFFLINE");
+    assert.ok(Date.now() - startedAt < 500, "重建应立即让 in-flight pending 失败关闭，不应等到 deadline 才 408 超时");
+  });
+});
+
 test("listMailRoutes() 与 src/contracts/routes.ts 的 MAIL_ROUTES id 集合完全一致", async (t) => {
   await withHarness(t, async (harness) => {
     const { MAIL_ROUTES } = await import("../dist/contracts/routes.js");

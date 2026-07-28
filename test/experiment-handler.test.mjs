@@ -428,55 +428,70 @@ test("Task #48：getState() 淘汰真源里已过期的 pending——不再展�
   });
 });
 
-test("Task #48：已配对状态下 beginPairing 在 WebExtension 与 HTTP 两侧都必须精确拒绝，且既有 pairing/epoch 保持不变", async (t) => {
-  // 说明（Task #49 复核修正）：此前这里曾直接用测试后门在真源里人工拼出
-  // "已配对 + 又有一个过期 pending 残留"这个组合态，去验证 stateView()
-  // 里 `state.pairing ? "paired" : "unpaired"` 这条防御性分支。但生产系统
-  // 的状态机结构性禁止这个组合出现——`beginPairing()`/POST
-  // /v1/pairing/intents 在已配对状态下都会直接 409（"已配对状态必须先
-  // 显式撤销现有 client"，见 api.js 第 954/1035/1136 行的 E_ALREADY_PAIRED
-  // 守卫），没有任何公开入口能让"已配对"与"存在 pending"同时成立。用测试
-  // 后门绕过这些守卫去构造该状态，验证的是一段当前不可达的代码，而不是
-  // 真实安全不变量，还可能让读者误以为这个组合态是被允许触达的。
-  //
-  // 改为直接验证真正的不变量：已配对状态下，无论走哪个入口尝试重新配对
-  // 都必须被拒绝，且不能产生任何 pending 残留、不能影响既有 pairing 或
-  // epoch。stateView() 里的 paired 回退分支保留为纯防御性代码（与既有
-  // `/v1/pairing/intents/:id` 端点里同一模式一致，见 api.js 第 1046 行），
-  // 不因为它当前不可达就删除——只是不再用测试后门伪造一个违反安全守卫的
-  // 状态去覆盖它。
+// 说明（Task #49 复核修正，第二轮）：此前这里曾直接用测试后门在真源里
+// 人工拼出"已配对 + 又有一个过期 pending 残留"这个组合态，去验证
+// stateView() 里 `state.pairing ? "paired" : "unpaired"` 这条防御性分支。
+// 但生产系统的状态机结构性禁止这个组合出现——`beginPairing()`/POST
+// /v1/pairing/intents 在已配对状态下都会直接拒绝（"已配对状态必须先
+// 显式撤销现有 client"，见 api.js 第 954/1035/1136 行的 E_ALREADY_PAIRED
+// 守卫），没有任何公开入口能让"已配对"与"存在 pending"同时成立。stateView()
+// 里的 paired 回退分支因此保留为纯防御性代码（与既有
+// `/v1/pairing/intents/:id` 端点里同一模式一致，见 api.js 第 1046 行）；
+// 不再用测试后门伪造一个违反安全守卫的状态去覆盖它。
+//
+// 下面两条用例改为分别、只通过公开入口（WebExtension api / 真实签名 HTTP
+// 请求）验证真正的安全不变量：已配对状态下重新发起配对必须被拒绝，且
+// 拒绝之后通过 getState() 这个真实调用方会用到的公开视图（而不是内部
+// state 后门）观测到的 pendingIntentId/pairingState/clientId/pairingEpoch
+// 全部原样不变。
+
+test("Task #48：已配对状态下 WebExtension beginPairing 必须拒绝，getState() 观测到 pendingIntentId 仍为 null 且 pairing/epoch 不变", async (t) => {
   await withHarness(t, async (harness) => {
     const identity = makeIdentity();
     await pair(harness, identity);
     const before = await harness.api.getState();
     assert.equal(before.pairingState, "paired");
     assert.equal(before.clientId, identity.clientId);
+    assert.equal(before.pendingIntentId, null);
     const epochBefore = before.pairingEpoch;
 
-    // WebExtension 入口：已配对状态下重新 beginPairing 必须精确拒绝，且
-    // 不能在真源里留下任何 pending。
     await assert.rejects(
       harness.api.beginPairing(identity.clientId, "Ed25519", identity.publicKeySpkiBase64),
       /已配对状态必须先显式撤销现有 client/,
     );
-    assert.equal(harness.state.pending, null, "拒绝路径不应该留下任何 pending 残留");
 
-    // HTTP 入口：已配对状态下，POST /v1/pairing/intents 要求用当前已配对
-    // client 自己的身份签名才能先通过认证层（见 S2 用例"POST 到已配对状态
-    // 的 pairing route：签名无效必须先于 E_ALREADY_PAIRED 业务判定被拒"——
-    // 未注册身份的签名在认证层就会被拒成 401，根本到不了这条 409 业务判定），
-    // 因此这里用已配对 client 自己重新尝试配对，验证业务层的 E_ALREADY_PAIRED。
+    const after = await harness.api.getState();
+    assert.equal(after.pairingState, "paired", "拒绝后必须仍是 paired，不能退化成 pairing/unpaired");
+    assert.equal(after.clientId, identity.clientId, "clientId 不能因为一次被拒绝的重新配对尝试而改变");
+    assert.equal(after.pendingIntentId, null, "拒绝路径不应该产生任何可观测到的 pending");
+    assert.equal(after.pendingCode, null);
+    assert.equal(after.pairingEpoch, epochBefore, "epoch 不应该因为一次被拒绝的尝试而推进");
+  });
+});
+
+test("Task #48：已配对状态下 HTTP POST /v1/pairing/intents 必须稳定给出 409 E_ALREADY_PAIRED，getState() 观测到状态同样不变", async (t) => {
+  await withHarness(t, async (harness) => {
+    const identity = makeIdentity();
+    await pair(harness, identity);
+    const before = await harness.api.getState();
+    const epochBefore = before.pairingEpoch;
+
+    // 已配对状态下，POST /v1/pairing/intents 要求用当前已配对 client 自己
+    // 的身份签名才能先通过认证层（见 S2 用例"POST 到已配对状态的 pairing
+    // route：签名无效必须先于 E_ALREADY_PAIRED 业务判定被拒"——未注册身份
+    // 的签名在认证层就会被拒成 401，根本到不了这条 409 业务判定），因此这里
+    // 用已配对 client 自己重新尝试配对，稳定验证业务层的 E_ALREADY_PAIRED。
     const httpAttempt = await handle(harness, buildRequest(harness, {
       method: "POST", path: PAIRING_PATH, bodyText: pairingBody(identity), identity,
     }));
     assert.equal(httpAttempt.status, 409);
     assert.equal(httpAttempt.code, "E_ALREADY_PAIRED");
-    assert.equal(harness.state.pending, null);
 
-    // 两次尝试都被拒绝后，既有 pairing 与 epoch 必须原样保留，未受影响。
     const after = await harness.api.getState();
     assert.equal(after.pairingState, "paired");
     assert.equal(after.clientId, identity.clientId);
+    assert.equal(after.pendingIntentId, null, "409 拒绝路径不应该产生任何可观测到的 pending");
+    assert.equal(after.pendingCode, null);
     assert.equal(after.pairingEpoch, epochBefore);
   });
 });

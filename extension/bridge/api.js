@@ -758,6 +758,16 @@ function createOperationChannel(context) {
 // 发现 state.pending 已过期，直接清空真源（而不是只在返回值里隐藏），
 // pairingState 回退为"已配对"或"未配对"（取决于是否存在已确认的
 // pairing）——与 `/v1/pairing/intents/:id` 端点已经在用的回退逻辑一致。
+// `state.pairing ? "paired" : "unpaired"` 三元里的 "paired" 分支（Task #49
+// 复核确认）在当前状态机下结构性不可达：`beginPairing()`（WebExtension 与
+// HTTP 两个入口）都在已存在 `state.pairing` 时直接 409/throw
+// "已配对状态必须先显式撤销现有 client"（E_ALREADY_PAIRED，见本文件内
+// beginPairing 相关分支），因此"已配对且同时存在 pending"这个组合本身
+// 永远不会真实产生。保留这个分支是纯防御性写法——万一未来状态机允许了
+// 尚未预见的路径产生这种组合（例如某次重构放宽了 E_ALREADY_PAIRED 的
+// 时机），这里也不会错误地把已确认的 pairing 一并清空成 unpaired。不要
+// 因为它当前不可达就删掉，也不要为了"覆盖"它而弱化上述任何一处
+// E_ALREADY_PAIRED 守卫去人为制造这个组合态。
 function evictExpiredPendingIfNeeded(state) {
   if (state.pending && Date.parse(state.pending.expiresAt) <= Date.now()) {
     state.pending = null;

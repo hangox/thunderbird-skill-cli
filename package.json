@@ -19,6 +19,7 @@
     "build:cli": "tsc -p tsconfig.json",
     "build:extension": "tsc -p extension/tsconfig.json && node scripts/bundle-background.ts",
     "package:extension": "npm run build:extension && node scripts/package-extension.ts",
+    "release": "tsx scripts/release.ts",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p extension/tsconfig.json --noEmit",
     "test": "npm run build && node scripts/package-extension.ts && node --test test/*.test.mjs",
     "test:unit": "npm run build && node scripts/package-extension.ts && node --test test/*.test.mjs",
@@ -37,6 +38,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "tsx": "^4.23.1",
     "typescript": "^5.8.0"
   }
 }
